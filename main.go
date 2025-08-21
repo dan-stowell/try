@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	_ "modernc.org/sqlite"
 )
 
  // Base app directory; clones live under <dir>/clone.
@@ -36,6 +38,76 @@ var appDir = flag.String("dir", defaultAppDir(), "base directory for Trybook dat
 
 func cloneBaseDir() string {
 	return filepath.Join(*appDir, "clone")
+}
+
+// trybook database lives under <dir>/trybook.db
+func dbPath() string {
+	return filepath.Join(*appDir, "trybook.db")
+}
+
+var db *sql.DB
+
+func initDB() error {
+	if err := os.MkdirAll(*appDir, 0o755); err != nil {
+		return fmt.Errorf("create app dir: %w", err)
+	}
+	dsn := "file:" + dbPath() + "?cache=shared&_pragma=busy_timeout=5000&_journal_mode=WAL&_fk=1"
+	var err error
+	db, err = sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("ping db: %w", err)
+	}
+	const schema = `
+		CREATE TABLE IF NOT EXISTS clones (
+			org        TEXT NOT NULL,
+			repo       TEXT NOT NULL,
+			branch     TEXT NOT NULL,
+			commit_sha TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+			PRIMARY KEY (org, repo)
+		);`
+	if _, err := db.Exec(schema); err != nil {
+		return fmt.Errorf("schema: %w", err)
+	}
+	return nil
+}
+
+// Record or update clone metadata for org/repo by inspecting the local repo
+func recordClone(ctx context.Context, org, repo string) error {
+	dir := repoDirPath(org, repo)
+	// Determine checked-out branch
+	bc := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	bc.Dir = dir
+	bOut, err := bc.Output()
+	if err != nil {
+		return fmt.Errorf("get branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(bOut))
+	// Determine latest commit
+	cc := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cc.Dir = dir
+	cOut, err := cc.Output()
+	if err != nil {
+		return fmt.Errorf("get commit: %w", err)
+	}
+	sha := strings.TrimSpace(string(cOut))
+	// Upsert record
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO clones(org, repo, branch, commit_sha)
+		VALUES(?, ?, ?, ?)
+		ON CONFLICT(org, repo) DO UPDATE SET
+			branch = excluded.branch,
+			commit_sha = excluded.commit_sha,
+			updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+	`, org, repo, branch, sha)
+	if err != nil {
+		return fmt.Errorf("upsert clone: %w", err)
+	}
+	return nil
 }
 
 const pageTpl = `<!doctype html>
@@ -491,6 +563,9 @@ func tryHandler(w http.ResponseWriter, r *http.Request) {
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Clone failed: " + err.Error(), MsgClass: "error"})
 		return
 	}
+	if err := recordClone(ctx, org, repo); err != nil {
+		log.Printf("tryHandler: recordClone error: %v", err)
+	}
 	log.Printf("tryHandler: clone ready; redirecting to /r/%s/%s", org, repo)
 	http.Redirect(w, r, "/r/"+org+"/"+repo, http.StatusSeeOther)
 }
@@ -705,6 +780,10 @@ func newMux() http.Handler {
 
 func main() {
 	flag.Parse()
+	if err := initDB(); err != nil {
+		log.Fatalf("initDB: %v", err)
+	}
+	defer func() { if db != nil { _ = db.Close() } }()
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
