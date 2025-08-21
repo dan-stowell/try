@@ -101,7 +101,14 @@ const repoPageTpl = `<!doctype html>
             controller.abort();
           });
           statusEl.textContent = 'Running...';
-          fetch('/run', { method: 'POST', body: new FormData(runForm), signal: controller.signal })
+          var fd = new FormData(runForm);
+          var body = new URLSearchParams(fd);
+          fetch('/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+            body: body.toString(),
+            signal: controller.signal
+          })
             .then(function(res){
               var reader = res.body.getReader();
               var dec = new TextDecoder();
@@ -420,11 +427,27 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		log.Printf("runHandler: ParseForm error: %v", err)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
+	log.Printf("runHandler: content-type=%q", r.Header.Get("Content-Type"))
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			log.Printf("runHandler: ParseMultipartForm error: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+	} else {
+		if err := r.ParseForm(); err != nil {
+			log.Printf("runHandler: ParseForm error: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
 	}
+	// Debug keys parsed
+	keys := make([]string, 0, len(r.Form))
+	for k := range r.Form {
+		keys = append(keys, k)
+	}
+	log.Printf("runHandler: parsed form keys=%v", keys)
 	org := strings.TrimSpace(r.FormValue("org"))
 	repo := strings.TrimSpace(r.FormValue("repo"))
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
