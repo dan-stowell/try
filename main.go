@@ -76,8 +76,54 @@ const repoPageTpl = `<!doctype html>
     {{if .Prompt}}
       <section class="prompt-view">
         <textarea class="prompt-input" readonly rows="2">{{.Prompt}}</textarea>
+        <div class="actions">
+          <button id="stopBtn" type="button">Stop</button>
+          <span id="status">Running...</span>
+        </div>
       </section>
-      {{if .ClaudeOut}}<pre class="llm-out">{{.ClaudeOut}}</pre>{{end}}
+      <pre id="out" class="llm-out"></pre>
+      <form id="runForm" method="post" action="/run" style="display:none">
+        <input type="hidden" name="org" value="{{.Org}}">
+        <input type="hidden" name="repo" value="{{.Repo}}">
+        <input type="hidden" name="prompt" value="{{.Prompt}}">
+      </form>
+      <script>
+        (function(){
+          var runForm = document.getElementById('runForm');
+          var outEl = document.getElementById('out');
+          var statusEl = document.getElementById('status');
+          var stopBtn = document.getElementById('stopBtn');
+          if (!runForm || !outEl) return;
+          var controller = new AbortController();
+          stopBtn.addEventListener('click', function(){
+            stopBtn.disabled = true;
+            statusEl.textContent = 'Stopping...';
+            controller.abort();
+          });
+          statusEl.textContent = 'Running...';
+          fetch('/run', { method: 'POST', body: new FormData(runForm), signal: controller.signal })
+            .then(function(res){
+              var reader = res.body.getReader();
+              var dec = new TextDecoder();
+              function read() {
+                return reader.read().then(function(result){
+                  if (result.done) return;
+                  outEl.textContent += dec.decode(result.value, {stream:true});
+                  outEl.scrollTop = outEl.scrollHeight;
+                  return read();
+                });
+              }
+              return read();
+            })
+            .catch(function(err){
+              outEl.textContent += '\n[stream error] ' + err + '\n';
+            })
+            .finally(function(){
+              statusEl.textContent = 'Done';
+              stopBtn.disabled = true;
+            });
+        })();
+      </script>
     {{end}}
     <form method="post" action="/prompt" novalidate>
       <input type="hidden" name="org" value="{{.Org}}">
@@ -108,7 +154,7 @@ func setHTMLHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'")
 }
 
 func isSafeToken(s string) bool {
@@ -344,31 +390,77 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run `claude --print` in the repo directory, feeding the prompt on stdin.
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-	defer cancel()
-	log.Printf("promptHandler: running `claude --print` in %s", repoDirPath(org, repo))
-	cmd := exec.CommandContext(ctx, "claude", "--print")
-	cmd.Dir = repoDirPath(org, repo)
-	cmd.Stdin = strings.NewReader(prompt)
-	out, err := cmd.CombinedOutput()
-	log.Printf("promptHandler: claude done; err=%v outLen=%d", err, len(out))
-
+	log.Printf("promptHandler: starting streaming for org=%s repo=%s", org, repo)
 	vm := viewModel{
-		Title:     "Trybook - " + org + "/" + repo,
-		Org:       org,
-		Repo:      repo,
-		ClaudeOut: string(out),
-		Prompt:    prompt,
-		MsgClass:  "ok",
+		Title:    "Trybook - " + org + "/" + repo,
+		Org:      org,
+		Repo:     repo,
+		Prompt:   prompt,
+		MsgClass: "ok",
 	}
-	if err != nil {
-		vm.Message = "claude failed: " + err.Error()
-		vm.MsgClass = "error"
-	}
-
 	setHTMLHeaders(w)
 	_ = repoTpl.Execute(w, vm)
+}
+
+func runHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("runHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	if r.Method != http.MethodPost {
+		log.Printf("runHandler: non-POST; rejecting")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		log.Printf("runHandler: ParseForm error: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	org := strings.TrimSpace(r.FormValue("org"))
+	repo := strings.TrimSpace(r.FormValue("repo"))
+	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	if !isSafeToken(org) || !isSafeToken(repo) || prompt == "" {
+		log.Printf("runHandler: invalid input org=%q repo=%q promptLen=%d", org, repo, len(prompt))
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// Prepare streaming response
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Accel-Buffering", "no")
+	f, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Inform client immediately
+	_, _ = w.Write([]byte("Starting gemini...\n\n"))
+	f.Flush()
+
+	ctx := r.Context() // canceled when client aborts (Stop button)
+	cmd := exec.CommandContext(ctx, "gemini", "--prompt", prompt)
+	cmd.Dir = repoDirPath(org, repo)
+	fw := flushWriter{w: w, f: f}
+	cmd.Stdout = fw
+	cmd.Stderr = fw
+
+	log.Printf("runHandler: running `gemini --prompt` in %s", cmd.Dir)
+	if err := cmd.Start(); err != nil {
+		log.Printf("runHandler: start error: %v", err)
+		_, _ = w.Write([]byte("error: failed to start gemini: " + err.Error() + "\n"))
+		f.Flush()
+		return
+	}
+	if err := cmd.Wait(); err != nil {
+		log.Printf("runHandler: gemini exited with error: %v", err)
+		_, _ = w.Write([]byte("\n[gemini exited with error: " + err.Error() + "]\n"))
+		f.Flush()
+		return
+	}
+	log.Printf("runHandler: gemini complete")
+	_, _ = w.Write([]byte("\n[done]\n"))
+	f.Flush()
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -384,6 +476,7 @@ func newMux() http.Handler {
 	mux.HandleFunc("/try", tryHandler)
 	mux.HandleFunc("/r/", repoHandler)
 	mux.HandleFunc("/prompt", promptHandler)
+	mux.HandleFunc("/run", runHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	return mux
 }

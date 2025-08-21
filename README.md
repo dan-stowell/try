@@ -22,3 +22,4 @@ Usage notes:
   - go run ./main.go -clone-dir=/path/to/dir
 - Cloning is shallow: --single-branch --depth 1. It attempts branch main, then master, then the default branch.
 - Requires git to be available in PATH.
+- Requires gemini CLI in PATH (used via: gemini --prompt). The output is streamed to the page; click Stop to cancel a running request.
