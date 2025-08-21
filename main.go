@@ -111,14 +111,19 @@ const repoPageTpl = `<!doctype html>
       </form>
       <script>
         (function(){
-          var pendingEl = document.getElementById('pending');
-          if (pendingEl && pendingEl.scrollIntoView) {
-            pendingEl.scrollIntoView({block:'start'});
-          }
           var runForm = document.getElementById('runForm');
           var outEl = document.getElementById('out-{{.PendingIdx}}');
+          var pendingEl = document.getElementById('pending');
+          if (outEl && outEl.scrollIntoView) {
+            outEl.scrollIntoView({block:'end'});
+          }
           var statusEl = document.getElementById('status');
           var stopBtn = document.getElementById('stopBtn');
+          var stickToBottom = true;
+          window.addEventListener('scroll', function(){
+            var nearBottom = (window.scrollY + window.innerHeight) >= (document.documentElement.scrollHeight - 40);
+            stickToBottom = nearBottom;
+          });
           if (!runForm || !outEl) return;
           var controller = new AbortController();
           stopBtn.addEventListener('click', function(){
@@ -143,6 +148,9 @@ const repoPageTpl = `<!doctype html>
                   if (result.done) return;
                   outEl.textContent += dec.decode(result.value, {stream:true});
                   outEl.scrollTop = outEl.scrollHeight;
+                  if (stickToBottom && outEl.scrollIntoView) {
+                    outEl.scrollIntoView({block:'end'});
+                  }
                   return read();
                 });
               }
