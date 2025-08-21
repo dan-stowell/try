@@ -176,19 +176,23 @@ func pathExists(p string) bool {
 
 func ensureRepoCloned(ctx context.Context, org, repo string) error {
 	dest := repoDirPath(org, repo)
+	log.Printf("ensureRepoCloned: org=%s repo=%s dest=%s", org, repo, dest)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 	if pathExists(filepath.Join(dest, ".git")) {
+		log.Printf("ensureRepoCloned: already cloned: %s", dest)
 		return nil
 	}
 	if pathExists(dest) {
+		log.Printf("ensureRepoCloned: removing existing path: %s", dest)
 		_ = os.RemoveAll(dest)
 	}
 	return cloneRepo(ctx, org, repo)
 }
 
 func cloneRepo(ctx context.Context, org, repo string) error {
+	log.Printf("cloneRepo: org=%s repo=%s", org, repo)
 	dest := repoDirPath(org, repo)
 	src := fmt.Sprintf("https://github.com/%s/%s.git", org, repo)
 	attempts := [][]string{
@@ -197,13 +201,16 @@ func cloneRepo(ctx context.Context, org, repo string) error {
 		{"git", "clone", "--depth", "1", "--single-branch", src, dest},
 	}
 	for i, args := range attempts {
+		log.Printf("cloneRepo: attempt %d: %v", i+1, args)
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
+			log.Printf("cloneRepo: success to %s", dest)
 			return nil
 		}
 		_ = os.RemoveAll(dest)
 		if i == len(attempts)-1 {
+			log.Printf("cloneRepo: all attempts failed for %s/%s", org, repo)
 			return fmt.Errorf("git clone failed: %v\n%s", err, string(out))
 		}
 	}
@@ -226,7 +233,9 @@ func isLikelyGitHubURL(s string) bool {
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("indexHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 	if r.Method != http.MethodGet {
+		log.Printf("indexHandler: non-GET; redirecting to /")
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
@@ -235,45 +244,57 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func tryHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("tryHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 	if r.Method != http.MethodPost {
+		log.Printf("tryHandler: non-POST; redirecting to /")
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
+		log.Printf("tryHandler: ParseForm error: %v", err)
 		setHTMLHeaders(w)
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Invalid form submission.", MsgClass: "error"})
 		return
 	}
 	input := strings.TrimSpace(r.FormValue("url"))
+	log.Printf("tryHandler: input=%q", input)
 	org, repo, err := parseRepoInput(input)
 	if err != nil {
+		log.Printf("tryHandler: parseRepoInput error: %v", err)
 		setHTMLHeaders(w)
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: err.Error(), MsgClass: "error"})
 		return
 	}
 	if err := os.MkdirAll(*cloneDir, 0o755); err != nil {
+		log.Printf("tryHandler: MkdirAll(%q) error: %v", *cloneDir, err)
 		setHTMLHeaders(w)
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Server cannot create clone dir.", MsgClass: "error"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
+	log.Printf("tryHandler: ensuring clone at %s", repoDirPath(org, repo))
 	if err := ensureRepoCloned(ctx, org, repo); err != nil {
+		log.Printf("tryHandler: ensureRepoCloned error: %v", err)
 		setHTMLHeaders(w)
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Clone failed: " + err.Error(), MsgClass: "error"})
 		return
 	}
+	log.Printf("tryHandler: clone ready; redirecting to /r/%s/%s", org, repo)
 	http.Redirect(w, r, "/r/"+org+"/"+repo, http.StatusSeeOther)
 }
 
 func repoHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("repoHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 	if r.Method != http.MethodGet {
+		log.Printf("repoHandler: non-GET; redirecting to /")
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/r/")
 	parts := strings.Split(path, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || !isSafeToken(parts[0]) || !isSafeToken(parts[1]) {
+		log.Printf("repoHandler: invalid path %q; redirecting", r.URL.Path)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
@@ -283,26 +304,34 @@ func repoHandler(w http.ResponseWriter, r *http.Request) {
 		Repo:  parts[1],
 	}
 	setHTMLHeaders(w)
+	log.Printf("repoHandler: render %s/%s", parts[0], parts[1])
 	_ = repoTpl.Execute(w, vm)
 }
 
 func promptHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("promptHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 	if r.Method != http.MethodPost {
+		log.Printf("promptHandler: non-POST; redirecting to /")
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
+		log.Printf("promptHandler: ParseForm error: %v", err)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	org := strings.TrimSpace(r.FormValue("org"))
 	repo := strings.TrimSpace(r.FormValue("repo"))
 	if !isSafeToken(org) || !isSafeToken(repo) {
+		log.Printf("promptHandler: invalid org/repo: org=%q repo=%q", org, repo)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	log.Printf("promptHandler: org=%s repo=%s", org, repo)
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	log.Printf("promptHandler: promptLen=%d", len(prompt))
 	if prompt == "" {
+		log.Printf("promptHandler: empty prompt")
 		vm := viewModel{
 			Title:    "Trybook - " + org + "/" + repo,
 			Org:      org,
@@ -318,10 +347,12 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 	// Run `claude --print` in the repo directory, feeding the prompt on stdin.
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
+	log.Printf("promptHandler: running `claude --print` in %s", repoDirPath(org, repo))
 	cmd := exec.CommandContext(ctx, "claude", "--print")
 	cmd.Dir = repoDirPath(org, repo)
 	cmd.Stdin = strings.NewReader(prompt)
 	out, err := cmd.CombinedOutput()
+	log.Printf("promptHandler: claude done; err=%v outLen=%d", err, len(out))
 
 	vm := viewModel{
 		Title:     "Trybook - " + org + "/" + repo,
@@ -341,6 +372,7 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("healthHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
