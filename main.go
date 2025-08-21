@@ -542,10 +542,6 @@ const repoPageTpl = `<!doctype html>
       (function(){
         var form = document.getElementById('nextPrompt');
         if (!form) return;
-        form.addEventListener('submit', function(){
-          // Ensure the next navigation lands at the pending section
-          form.action = (form.action.split('#')[0] || '/prompt') + '#pending';
-        });
         var ta = form.querySelector('textarea[name="prompt"]');
         if (!ta) return;
         ta.addEventListener('keydown', function(e){
@@ -946,6 +942,12 @@ func notebookHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	pendingIdx := -1
+	if p := r.URL.Query().Get("pending"); p != "" {
+		if i, err := strconv.Atoi(p); err == nil {
+			pendingIdx = i
+		}
+	}
 	vm := viewModel{
 		Title:       "Trybook - " + meta.Org + "/" + meta.Repo,
 		Org:         meta.Org,
@@ -953,8 +955,8 @@ func notebookHandler(w http.ResponseWriter, r *http.Request) {
 		Branch:      meta.Branch,
 		CommitShort: func() string { if len(meta.SHA) >= 7 { return meta.SHA[:7] } else { return meta.SHA } }(),
 		Entries:     entries,
-		PendingIdx:  -1,
-		HasPending:  false,
+		PendingIdx:  pendingIdx,
+		HasPending:  pendingIdx >= 0,
 		NotebookID:  meta.ID,
 	}
 	setHTMLHeaders(w)
@@ -1008,25 +1010,8 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	meta, _, err := loadNotebook(r.Context(), nbID)
-	if err != nil {
-		log.Printf("promptHandler: loadNotebook error: %v", err)
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-	vm := viewModel{
-		Title:       "Trybook - " + meta.Org + "/" + meta.Repo,
-		Org:         meta.Org,
-		Repo:        meta.Repo,
-		Branch:      meta.Branch,
-		NotebookID:  nbID,
-		Entries:     func() []entry { _, es, _ := loadNotebook(r.Context(), nbID); return es }(),
-		PendingIdx:  idx,
-		HasPending:  true,
-		MsgClass:    "ok",
-	}
-	setHTMLHeaders(w)
-	_ = repoTpl.Execute(w, vm)
+	http.Redirect(w, r, "/n/"+nbID+"?pending="+strconv.Itoa(idx)+"#pending", http.StatusSeeOther)
+	return
 }
 
 func runHandler(w http.ResponseWriter, r *http.Request) {
