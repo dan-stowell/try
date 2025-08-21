@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -12,7 +16,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -73,24 +79,26 @@ const repoPageTpl = `<!doctype html>
 <body>
   <main>
     <h1>{{.Org}}/{{.Repo}}</h1>
-    {{if .Prompt}}
+    {{range $i, $e := .Entries}}
       <section class="prompt-view">
-        <textarea class="prompt-input" readonly rows="2">{{.Prompt}}</textarea>
-        <div class="actions">
-          <button id="stopBtn" type="button">Stop</button>
-          <span id="status">Running...</span>
-        </div>
+        <textarea class="prompt-input" readonly rows="2">{{ $e.Prompt }}</textarea>
       </section>
-      <pre id="out" class="llm-out"></pre>
+      <pre id="out-{{$i}}" class="llm-out">{{ $e.Output }}</pre>
+    {{end}}
+    {{if .HasPending}}
+      <div class="actions">
+        <button id="stopBtn" type="button">Stop</button>
+        <span id="status">Running...</span>
+      </div>
       <form id="runForm" method="post" action="/run" style="display:none">
         <input type="hidden" name="org" value="{{.Org}}">
         <input type="hidden" name="repo" value="{{.Repo}}">
-        <input type="hidden" name="prompt" value="{{.Prompt}}">
+        <input type="hidden" name="idx" value="{{.PendingIdx}}">
       </form>
       <script>
         (function(){
           var runForm = document.getElementById('runForm');
-          var outEl = document.getElementById('out');
+          var outEl = document.getElementById('out-{{.PendingIdx}}');
           var statusEl = document.getElementById('status');
           var stopBtn = document.getElementById('stopBtn');
           if (!runForm || !outEl) return;
@@ -148,13 +156,14 @@ const repoPageTpl = `<!doctype html>
 var repoTpl = template.Must(template.New("repo").Parse(repoPageTpl))
 
 type viewModel struct {
-	Title     string
-	Message   string
-	MsgClass  string
-	Org       string
-	Repo      string
-	Prompt    string
-	ClaudeOut string
+	Title      string
+	Message    string
+	MsgClass   string
+	Org        string
+	Repo       string
+	Entries    []entry
+	PendingIdx int  // index of the entry currently running; -1 if none
+	HasPending bool // true if there is a pending entry to run
 }
 
 func setHTMLHeaders(w http.ResponseWriter) {
@@ -296,6 +305,81 @@ func isLikelyGitHubURL(s string) bool {
 	return false
 }
 
+// In-memory notebook
+
+type entry struct {
+	Prompt string
+	Output string
+}
+
+var (
+	notesMu sync.Mutex
+	notes   = make(map[string]map[string][]entry) // sessionID -> "org/repo" -> entries
+)
+
+func repoKey(org, repo string) string { return org + "/" + repo }
+
+func getSessionID(w http.ResponseWriter, r *http.Request) string {
+	const ck = "tb"
+	if c, err := r.Cookie(ck); err == nil && c.Value != "" {
+		return c.Value
+	}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		b = []byte(fmt.Sprintf("%d", time.Now().UnixNano()))
+	}
+	id := hex.EncodeToString(b)
+	http.SetCookie(w, &http.Cookie{
+		Name:     ck,
+		Value:    id,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400 * 7,
+	})
+	return id
+}
+
+func getEntries(session, org, repo string) []entry {
+	notesMu.Lock()
+	defer notesMu.Unlock()
+	m := notes[session]
+	if m == nil {
+		return nil
+	}
+	k := repoKey(org, repo)
+	src := m[k]
+	dst := make([]entry, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func appendEntry(session, org, repo, prompt string) int {
+	notesMu.Lock()
+	defer notesMu.Unlock()
+	m := notes[session]
+	if m == nil {
+		m = make(map[string][]entry)
+		notes[session] = m
+	}
+	k := repoKey(org, repo)
+	m[k] = append(m[k], entry{Prompt: prompt})
+	return len(m[k]) - 1
+}
+
+func setEntryOutput(session, org, repo string, idx int, out string) {
+	notesMu.Lock()
+	defer notesMu.Unlock()
+	m := notes[session]
+	if m == nil {
+		return
+	}
+	k := repoKey(org, repo)
+	if idx >= 0 && idx < len(m[k]) {
+		m[k][idx].Output = out
+	}
+}
+
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("indexHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 	if r.Method != http.MethodGet {
@@ -362,10 +446,15 @@ func repoHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	sid := getSessionID(w, r)
+	entries := getEntries(sid, parts[0], parts[1])
 	vm := viewModel{
-		Title: "Trybook - " + parts[0] + "/" + parts[1],
-		Org:   parts[0],
-		Repo:  parts[1],
+		Title:      "Trybook - " + parts[0] + "/" + parts[1],
+		Org:        parts[0],
+		Repo:       parts[1],
+		Entries:    entries,
+		PendingIdx: -1,
+		HasPending: false,
 	}
 	setHTMLHeaders(w)
 	log.Printf("repoHandler: render %s/%s", parts[0], parts[1])
@@ -409,12 +498,17 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("promptHandler: starting streaming for org=%s repo=%s", org, repo)
+	sid := getSessionID(w, r)
+	idx := appendEntry(sid, org, repo, prompt)
+	log.Printf("promptHandler: appended entry idx=%d", idx)
 	vm := viewModel{
-		Title:    "Trybook - " + org + "/" + repo,
-		Org:      org,
-		Repo:     repo,
-		Prompt:   prompt,
-		MsgClass: "ok",
+		Title:      "Trybook - " + org + "/" + repo,
+		Org:        org,
+		Repo:       repo,
+		Entries:    getEntries(sid, org, repo),
+		PendingIdx: idx,
+		HasPending: true,
+		MsgClass:   "ok",
 	}
 	setHTMLHeaders(w)
 	_ = repoTpl.Execute(w, vm)
@@ -448,14 +542,33 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		keys = append(keys, k)
 	}
 	log.Printf("runHandler: parsed form keys=%v", keys)
+	sid := getSessionID(w, r)
 	org := strings.TrimSpace(r.FormValue("org"))
 	repo := strings.TrimSpace(r.FormValue("repo"))
-	prompt := strings.TrimSpace(r.FormValue("prompt"))
-	if !isSafeToken(org) || !isSafeToken(repo) || prompt == "" {
-		log.Printf("runHandler: invalid input org=%q repo=%q promptLen=%d", org, repo, len(prompt))
+	idxStr := strings.TrimSpace(r.FormValue("idx"))
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil {
+		log.Printf("runHandler: invalid idx %q: %v", idxStr, err)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if !isSafeToken(org) || !isSafeToken(repo) {
+		log.Printf("runHandler: invalid org/repo: org=%q repo=%q", org, repo)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// Resolve prompt from notebook
+	var prompt string
+	{
+		entries := getEntries(sid, org, repo)
+		if idx < 0 || idx >= len(entries) {
+			log.Printf("runHandler: idx out of range: %d (len=%d)", idx, len(entries))
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		prompt = entries[idx].Prompt
+	}
+	log.Printf("runHandler: session=%s org=%s repo=%s idx=%d promptLen=%d", sid, org, repo, idx, len(prompt))
 
 	// Prepare streaming response
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -483,9 +596,11 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		cmd.Env = os.Environ()
 		log.Printf("runHandler: warning: GEMINI_API_KEY not set")
 	}
+	var buf bytes.Buffer
 	fw := flushWriter{w: w, f: f}
-	cmd.Stdout = fw
-	cmd.Stderr = fw
+	mw := io.MultiWriter(&buf, fw)
+	cmd.Stdout = mw
+	cmd.Stderr = mw
 
 	log.Printf("runHandler: running `gemini --prompt` in %s", cmd.Dir)
 	if err := cmd.Start(); err != nil {
@@ -496,11 +611,13 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := cmd.Wait(); err != nil {
 		log.Printf("runHandler: gemini exited with error: %v", err)
+		setEntryOutput(sid, org, repo, idx, buf.String())
 		_, _ = w.Write([]byte("\n[gemini exited with error: " + err.Error() + "]\n"))
 		f.Flush()
 		return
 	}
 	log.Printf("runHandler: gemini complete")
+	setEntryOutput(sid, org, repo, idx, buf.String())
 	_, _ = w.Write([]byte("\n[done]\n"))
 	f.Flush()
 }
