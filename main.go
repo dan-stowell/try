@@ -401,7 +401,7 @@ const repoPageTpl = `<!doctype html>
 <body>
   <main>
     <h1>{{.Org}}/{{.Repo}}</h1>
-    <p><small>Branch: {{.Branch}} &middot; Commit: {{.CommitShort}}</small></p>
+    <p><small>Branch: {{.Branch}} &middot; Commit: <span id="commitShort">{{.CommitShort}}</span></small></p>
     {{range $i, $e := .Entries}}
       <section class="prompt-view">
         <textarea class="prompt-input" readonly rows="2">{{ $e.Prompt }}</textarea>
@@ -411,11 +411,11 @@ const repoPageTpl = `<!doctype html>
     <div class="outbox aider" id="box-aider-{{$i}}" data-model="aider" data-i="{{$i}}" style="display:none">
       <div class="box-header">
         <span class="model-tag">aider</span>
-        <span id="status-aider-{{$i}}" class="status-badge">todo</span>
+        <span id="status-aider-{{$i}}" class="status-badge thinking">thinking</span>
         <button type="button" class="toggle" data-i="{{$i}}" data-model="aider">Expand</button>
       </div>
-      <pre id="prev-aider-{{$i}}" class="preview">not implemented yet</pre>
-      <pre id="out-aider-{{$i}}" class="llm-out" hidden>aider is not implemented yet</pre>
+      <pre id="prev-aider-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-aider-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
     </div>
     <div class="outbox claude" id="box-claude-{{$i}}" data-model="claude" data-i="{{$i}}" style="display:none">
       <div class="box-header">
@@ -440,11 +440,13 @@ const repoPageTpl = `<!doctype html>
     <div class="outbox aider" id="box-aider-{{$i}}" data-model="aider" data-i="{{$i}}">
       <div class="box-header">
         <span class="model-tag">aider</span>
-        <span id="status-aider-{{$i}}" class="status-badge">todo</span>
+        <span id="status-aider-{{$i}}" class="status-badge {{if $e.Output}}done{{else}}thinking{{end}}">
+          {{if $e.Output}}done{{else}}thinking{{end}}
+        </span>
         <button type="button" class="toggle" data-i="{{$i}}" data-model="aider">Expand</button>
       </div>
-      <pre id="prev-aider-{{$i}}" class="preview">not implemented yet</pre>
-      <pre id="out-aider-{{$i}}" class="llm-out" hidden>aider is not implemented yet</pre>
+      <pre id="prev-aider-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-aider-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
     </div>
   {{else}}
     <!-- Completed question entries show both models -->
@@ -498,7 +500,18 @@ const repoPageTpl = `<!doctype html>
           var abortedAll = false;
           var remaining = 0; // will set to 2 if we start both models
 
+          function refreshCommit(){
+            fetch('/api/head?nb={{.NotebookID}}')
+              .then(function(res){ return res.text(); })
+              .then(function(txt){
+                var el = document.getElementById('commitShort');
+                if (el && txt) el.textContent = (txt || '').trim();
+              })
+              .catch(function(){ /* ignore */ });
+          }
+
           function showNextPromptAndRemovePending(){
+            refreshCommit();
             if (pendingEl && pendingEl.remove) { pendingEl.remove(); }
             else if (pendingEl) { pendingEl.style.display = 'none'; }
             var next = document.getElementById('nextPrompt');
@@ -608,12 +621,13 @@ const repoPageTpl = `<!doctype html>
               if (s.indexOf('edit') >= 0 && s.indexOf('question') < 0) decision = 'edit';
               if (s.trim() === 'edit') decision = 'edit';
               if (decision === 'edit') {
-                // Show Aider placeholder
-                var box = document.getElementById('box-aider-{{.PendingIdx}}');
-                if (box) box.style.display = '';
+                // Show Aider box and start streaming
+                var ba = document.getElementById('box-aider-{{.PendingIdx}}');
+                if (ba) ba.style.display = '';
                 var st = document.getElementById('status-aider-{{.PendingIdx}}');
-                if (st) { st.textContent = 'todo'; st.className = 'status-badge'; }
-                showNextPromptAndRemovePending();
+                if (st) { st.textContent = 'thinking'; st.className = 'status-badge thinking'; }
+                remaining = 1;
+                startModel('aider');
               } else {
                 // Show model boxes and start both
                 var bc = document.getElementById('box-claude-{{.PendingIdx}}');
@@ -1172,7 +1186,7 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = "gemini"
 	}
-	if model != "gemini" && model != "claude" && model != "router" {
+	if model != "gemini" && model != "claude" && model != "router" && model != "aider" {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1215,6 +1229,15 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	} else if model == "claude" {
 		cmd = exec.CommandContext(ctx, "claude", "--print")
 		cmd.Stdin = strings.NewReader(prompt)
+	} else if model == "aider" {
+		cmd = exec.CommandContext(ctx, "aider",
+			"--model", "openai/gpt-5",
+			"--architect",
+			"--yes-always",
+			"--auto-commit",
+			"--auto-accept-architect",
+			"--message", prompt,
+		)
 	} else { // router
 		questionPrompt := "Is the following prompt asking an informational question or requesting edits to the code? Please respond 'question' or 'edit' and nothing else: " + prompt
 		cmd = exec.CommandContext(ctx, "llm", "--model", "gpt-5-nano", questionPrompt)
@@ -1234,6 +1257,13 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			cmd.Env = os.Environ()
 			log.Printf("runHandler: warning: ANTHROPIC_API_KEY not set")
+		}
+	} else if model == "aider" {
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "OPENAI_API_KEY="+key)
+		} else {
+			cmd.Env = os.Environ()
+			log.Printf("runHandler: warning: OPENAI_API_KEY not set")
 		}
 	} else { // router
 		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
@@ -1294,6 +1324,33 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+func nbHeadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nbID := strings.TrimSpace(r.URL.Query().Get("nb"))
+	if !isSafeToken(nbID) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	meta, _, err := loadNotebook(r.Context(), nbID)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	ctx := r.Context()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--short=7", "HEAD")
+	cmd.Dir = worktreeDirPath(meta.Org, meta.Repo, meta.Worktree)
+	out, err := cmd.Output()
+	if err != nil {
+		http.Error(w, "error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(strings.TrimSpace(string(out))))
+}
+
 func newMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", indexHandler)
@@ -1302,6 +1359,7 @@ func newMux() http.Handler {
 	mux.HandleFunc("/n/", notebookHandler)
 	mux.HandleFunc("/prompt", promptHandler)
 	mux.HandleFunc("/run", runHandler)
+	mux.HandleFunc("/api/head", nbHeadHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	return mux
 }
