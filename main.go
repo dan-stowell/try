@@ -460,7 +460,11 @@ const repoPageTpl = `<!doctype html>
               outEl.textContent += '\n[stream error] ' + err + '\n';
             })
             .finally(function(){
-              runStatusEl.textContent = 'Done';
+              if (pendingEl && pendingEl.remove) {
+                pendingEl.remove();
+              } else if (pendingEl) {
+                pendingEl.style.display = 'none';
+              }
               if (boxStatusEl && !aborted) {
                 boxStatusEl.textContent = 'done';
                 boxStatusEl.className = 'status-badge done';
