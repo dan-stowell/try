@@ -69,6 +69,24 @@ func initDB() error {
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
 			updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
 			PRIMARY KEY (org, repo)
+		);
+		CREATE TABLE IF NOT EXISTS notebooks (
+			id         TEXT PRIMARY KEY,
+			org        TEXT NOT NULL,
+			repo       TEXT NOT NULL,
+			branch     TEXT NOT NULL,
+			commit_sha TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+		);
+		CREATE TABLE IF NOT EXISTS notebook_entries (
+			notebook_id TEXT NOT NULL,
+			idx         INTEGER NOT NULL,
+			prompt      TEXT NOT NULL,
+			output      TEXT NOT NULL DEFAULT '',
+			created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+			updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+			PRIMARY KEY (notebook_id, idx),
+			FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
 		);`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("schema: %w", err)
@@ -76,26 +94,12 @@ func initDB() error {
 	return nil
 }
 
-// Record or update clone metadata for org/repo by inspecting the local repo
 func recordClone(ctx context.Context, org, repo string) error {
 	dir := repoDirPath(org, repo)
-	// Determine checked-out branch
-	bc := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	bc.Dir = dir
-	bOut, err := bc.Output()
+	branch, sha, err := currentBranchAndCommit(ctx, dir)
 	if err != nil {
-		return fmt.Errorf("get branch: %w", err)
+		return err
 	}
-	branch := strings.TrimSpace(string(bOut))
-	// Determine latest commit
-	cc := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-	cc.Dir = dir
-	cOut, err := cc.Output()
-	if err != nil {
-		return fmt.Errorf("get commit: %w", err)
-	}
-	sha := strings.TrimSpace(string(cOut))
-	// Upsert record
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO clones(org, repo, branch, commit_sha)
 		VALUES(?, ?, ?, ?)
@@ -104,10 +108,7 @@ func recordClone(ctx context.Context, org, repo string) error {
 			commit_sha = excluded.commit_sha,
 			updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 	`, org, repo, branch, sha)
-	if err != nil {
-		return fmt.Errorf("upsert clone: %w", err)
-	}
-	return nil
+	return err
 }
 
 const pageTpl = `<!doctype html>
@@ -134,6 +135,19 @@ const pageTpl = `<!doctype html>
       <input type="url" name="url" class="url-input" placeholder="Paste a GitHub URL..." required autofocus>
       <button type="submit">Open</button>
     </form>
+      <section style="margin-top:24px">
+        <h2 style="font-size:1.1rem">Notebooks</h2>
+        <ul>
+          {{range .Notebooks}}
+            <li>
+              <a href="/n/{{.ID}}">{{.Org}}/{{.Repo}}</a>
+              <small> ({{.Branch}} @ {{.CommitShort}}) &middot; {{.CreatedAt}}</small>
+            </li>
+          {{else}}
+            <li><em>No notebooks yet</em></li>
+          {{end}}
+        </ul>
+      </section>
     <script>
       (function(){
         var form = document.querySelector('form[action="/try"]');
@@ -178,6 +192,7 @@ const repoPageTpl = `<!doctype html>
 <body>
   <main>
     <h1>{{.Org}}/{{.Repo}}</h1>
+    <p><small>Branch: {{.Branch}} &middot; Commit: {{.CommitShort}}</small></p>
     {{range $i, $e := .Entries}}
       <section class="prompt-view">
         <textarea class="prompt-input" readonly rows="2">{{ $e.Prompt }}</textarea>
@@ -190,8 +205,7 @@ const repoPageTpl = `<!doctype html>
         <span id="status">Running...</span>
       </div>
       <form id="runForm" method="post" action="/run" style="display:none">
-        <input type="hidden" name="org" value="{{.Org}}">
-        <input type="hidden" name="repo" value="{{.Repo}}">
+        <input type="hidden" name="nb" value="{{.NotebookID}}">
         <input type="hidden" name="idx" value="{{.PendingIdx}}">
       </form>
       <script>
@@ -258,8 +272,7 @@ const repoPageTpl = `<!doctype html>
       </script>
     {{end}}
     <form id="nextPrompt" method="post" action="/prompt" novalidate{{if .HasPending}} style="display:none"{{end}}>
-      <input type="hidden" name="org" value="{{.Org}}">
-      <input type="hidden" name="repo" value="{{.Repo}}">
+      <input type="hidden" name="nb" value="{{.NotebookID}}">
       <textarea name="prompt" class="prompt-input" placeholder="Enter a prompt..." rows="2"></textarea>
       <div class="actions">
         <button type="submit">Run</button>
@@ -291,14 +304,18 @@ const repoPageTpl = `<!doctype html>
 var repoTpl = template.Must(template.New("repo").Parse(repoPageTpl))
 
 type viewModel struct {
-	Title      string
-	Message    string
-	MsgClass   string
-	Org        string
-	Repo       string
-	Entries    []entry
-	PendingIdx int  // index of the entry currently running; -1 if none
-	HasPending bool // true if there is a pending entry to run
+	Title       string
+	Message     string
+	MsgClass    string
+	Org         string
+	Repo        string
+	NotebookID  string
+	Branch      string
+	CommitShort string
+	Notebooks   []nbListItem
+	Entries     []entry
+	PendingIdx  int  // index of the entry currently running; -1 if none
+	HasPending  bool // true if there is a pending entry to run
 }
 
 func setHTMLHeaders(w http.ResponseWriter) {
@@ -523,7 +540,11 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setHTMLHeaders(w)
-	_ = tpl.Execute(w, viewModel{Title: "Trybook"})
+	nbs, err := listNotebooks(r.Context())
+	if err != nil {
+		log.Printf("indexHandler: listNotebooks error: %v", err)
+	}
+	_ = tpl.Execute(w, viewModel{Title: "Trybook", Notebooks: nbs})
 }
 
 func tryHandler(w http.ResponseWriter, r *http.Request) {
@@ -566,8 +587,15 @@ func tryHandler(w http.ResponseWriter, r *http.Request) {
 	if err := recordClone(ctx, org, repo); err != nil {
 		log.Printf("tryHandler: recordClone error: %v", err)
 	}
-	log.Printf("tryHandler: clone ready; redirecting to /r/%s/%s", org, repo)
-	http.Redirect(w, r, "/r/"+org+"/"+repo, http.StatusSeeOther)
+	nbID, err := createNotebook(ctx, org, repo)
+	if err != nil {
+		log.Printf("tryHandler: createNotebook error: %v", err)
+		setHTMLHeaders(w)
+		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Failed to create notebook.", MsgClass: "error"})
+		return
+	}
+	log.Printf("tryHandler: clone ready; redirecting to /n/%s", nbID)
+	http.Redirect(w, r, "/n/"+nbID, http.StatusSeeOther)
 }
 
 func repoHandler(w http.ResponseWriter, r *http.Request) {
@@ -599,6 +627,38 @@ func repoHandler(w http.ResponseWriter, r *http.Request) {
 	_ = repoTpl.Execute(w, vm)
 }
 
+func notebookHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("notebookHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	if r.Method != http.MethodGet {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/n/")
+	if id == "" || !isSafeToken(id) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	meta, entries, err := loadNotebook(r.Context(), id)
+	if err != nil {
+		log.Printf("notebookHandler: load error: %v", err)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	vm := viewModel{
+		Title:       "Trybook - " + meta.Org + "/" + meta.Repo,
+		Org:         meta.Org,
+		Repo:        meta.Repo,
+		Branch:      meta.Branch,
+		CommitShort: func() string { if len(meta.SHA) >= 7 { return meta.SHA[:7] } else { return meta.SHA } }(),
+		Entries:     entries,
+		PendingIdx:  -1,
+		HasPending:  false,
+		NotebookID:  meta.ID,
+	}
+	setHTMLHeaders(w)
+	_ = repoTpl.Execute(w, vm)
+}
+
 func promptHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("promptHandler: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 	if r.Method != http.MethodPost {
@@ -611,42 +671,52 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	org := strings.TrimSpace(r.FormValue("org"))
-	repo := strings.TrimSpace(r.FormValue("repo"))
-	if !isSafeToken(org) || !isSafeToken(repo) {
-		log.Printf("promptHandler: invalid org/repo: org=%q repo=%q", org, repo)
+	nbID := strings.TrimSpace(r.FormValue("nb"))
+	if !isSafeToken(nbID) {
+		log.Printf("promptHandler: invalid notebook id: %q", nbID)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	log.Printf("promptHandler: org=%s repo=%s", org, repo)
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
-	log.Printf("promptHandler: promptLen=%d", len(prompt))
 	if prompt == "" {
 		log.Printf("promptHandler: empty prompt")
+		meta, entries, err := loadNotebook(r.Context(), nbID)
+		if err != nil {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
 		vm := viewModel{
-			Title:    "Trybook - " + org + "/" + repo,
-			Org:      org,
-			Repo:     repo,
-			Message:  "Please enter a prompt.",
-			MsgClass: "error",
+			Title:      "Trybook - " + meta.Org + "/" + meta.Repo,
+			Org:        meta.Org,
+			Repo:       meta.Repo,
+			Branch:     meta.Branch,
+			NotebookID: nbID,
+			Message:    "Please enter a prompt.",
+			MsgClass:   "error",
+			Entries:    entries,
+			PendingIdx: -1,
 		}
 		setHTMLHeaders(w)
 		_ = repoTpl.Execute(w, vm)
 		return
 	}
-
-	log.Printf("promptHandler: starting streaming for org=%s repo=%s", org, repo)
-	sid := getSessionID(w, r)
-	idx := appendEntry(sid, org, repo, prompt)
-	log.Printf("promptHandler: appended entry idx=%d", idx)
+	idx, err := appendNotebookEntry(r.Context(), nbID, prompt)
+	if err != nil {
+		log.Printf("promptHandler: appendNotebookEntry error: %v", err)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	meta, _ := loadNotebook(r.Context(), nbID)
 	vm := viewModel{
-		Title:      "Trybook - " + org + "/" + repo,
-		Org:        org,
-		Repo:       repo,
-		Entries:    getEntries(sid, org, repo),
-		PendingIdx: idx,
-		HasPending: true,
-		MsgClass:   "ok",
+		Title:       "Trybook - " + meta.Org + "/" + meta.Repo,
+		Org:         meta.Org,
+		Repo:        meta.Repo,
+		Branch:      meta.Branch,
+		NotebookID:  nbID,
+		Entries:     func() []entry { _, es, _ := loadNotebook(r.Context(), nbID); return es }(),
+		PendingIdx:  idx,
+		HasPending:  true,
+		MsgClass:    "ok",
 	}
 	setHTMLHeaders(w)
 	_ = repoTpl.Execute(w, vm)
@@ -680,33 +750,30 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		keys = append(keys, k)
 	}
 	log.Printf("runHandler: parsed form keys=%v", keys)
-	sid := getSessionID(w, r)
-	org := strings.TrimSpace(r.FormValue("org"))
-	repo := strings.TrimSpace(r.FormValue("repo"))
+	nbID := strings.TrimSpace(r.FormValue("nb"))
 	idxStr := strings.TrimSpace(r.FormValue("idx"))
 	idx, err := strconv.Atoi(idxStr)
+	if err != nil || !isSafeToken(nbID) {
+		log.Printf("runHandler: bad nb/idx: nb=%q idx=%q err=%v", nbID, idxStr, err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// Load notebook meta
+	meta, _, err := loadNotebook(r.Context(), nbID)
 	if err != nil {
-		log.Printf("runHandler: invalid idx %q: %v", idxStr, err)
-		http.Error(w, "bad request", http.StatusBadRequest)
+		log.Printf("runHandler: loadNotebook error: %v", err)
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if !isSafeToken(org) || !isSafeToken(repo) {
-		log.Printf("runHandler: invalid org/repo: org=%q repo=%q", org, repo)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	// Resolve prompt from notebook
+	// Load prompt
 	var prompt string
-	{
-		entries := getEntries(sid, org, repo)
-		if idx < 0 || idx >= len(entries) {
-			log.Printf("runHandler: idx out of range: %d (len=%d)", idx, len(entries))
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		prompt = entries[idx].Prompt
+	if err := db.QueryRowContext(r.Context(), `
+		SELECT prompt FROM notebook_entries WHERE notebook_id = ? AND idx = ?
+	`, nbID, idx).Scan(&prompt); err != nil {
+		log.Printf("runHandler: load prompt error: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
 	}
-	log.Printf("runHandler: session=%s org=%s repo=%s idx=%d promptLen=%d", sid, org, repo, idx, len(prompt))
 
 	// Prepare streaming response
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -725,7 +792,7 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context() // canceled when client aborts (Stop button)
 	cmd := exec.CommandContext(ctx, "gemini", "--prompt", prompt)
-	cmd.Dir = repoDirPath(org, repo)
+	cmd.Dir = repoDirPath(meta.Org, meta.Repo)
 	// Ensure GEMINI_API_KEY is available to the child process
 	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
 		cmd.Env = append(os.Environ(), "GEMINI_API_KEY="+key)
@@ -749,13 +816,13 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := cmd.Wait(); err != nil {
 		log.Printf("runHandler: gemini exited with error: %v", err)
-		setEntryOutput(sid, org, repo, idx, buf.String())
+		_ = setNotebookEntryOutput(r.Context(), nbID, idx, buf.String())
 		_, _ = w.Write([]byte("\n[gemini exited with error: " + err.Error() + "]\n"))
 		f.Flush()
 		return
 	}
 	log.Printf("runHandler: gemini complete")
-	setEntryOutput(sid, org, repo, idx, buf.String())
+	_ = setNotebookEntryOutput(r.Context(), nbID, idx, buf.String())
 	_, _ = w.Write([]byte("\n[done]\n"))
 	f.Flush()
 }
@@ -772,6 +839,7 @@ func newMux() http.Handler {
 	mux.HandleFunc("/", indexHandler)
 	mux.HandleFunc("/try", tryHandler)
 	mux.HandleFunc("/r/", repoHandler)
+	mux.HandleFunc("/n/", notebookHandler)
 	mux.HandleFunc("/prompt", promptHandler)
 	mux.HandleFunc("/run", runHandler)
 	mux.HandleFunc("/healthz", healthHandler)
