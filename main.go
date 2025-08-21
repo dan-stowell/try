@@ -49,6 +49,20 @@ const pageTpl = `<!doctype html>
       <input type="url" name="url" class="url-input" placeholder="Paste a GitHub URL..." required autofocus>
       <button type="submit">Open</button>
     </form>
+    <script>
+      (function(){
+        var form = document.querySelector('form[action="/try"]');
+        if (!form) return;
+        var input = form.querySelector('input[name="url"]');
+        if (!input) return;
+        input.addEventListener('keydown', function(e){
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault();
+            if (form.requestSubmit) form.requestSubmit(); else form.submit();
+          }
+        });
+      })();
+    </script>
     {{if .Message}}<p class="msg {{.MsgClass}}">{{.Message}}</p>{{end}}
   </main>
 </body>
@@ -155,6 +169,20 @@ const repoPageTpl = `<!doctype html>
         <a class="link" href="/">Back</a>
       </div>
     </form>
+    <script>
+      (function(){
+        var form = document.getElementById('nextPrompt');
+        if (!form) return;
+        var ta = form.querySelector('textarea[name="prompt"]');
+        if (!ta) return;
+        ta.addEventListener('keydown', function(e){
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault();
+            if (form.requestSubmit) form.requestSubmit(); else form.submit();
+          }
+        });
+      })();
+    </script>
     {{if .Message}}<p class="msg {{.MsgClass}}">{{.Message}}</p>{{end}}
   </main>
 </body>
