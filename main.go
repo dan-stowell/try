@@ -26,16 +26,14 @@ const pageTpl = `<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{.Title}}</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root { color-scheme: light; }
     body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; display:flex; min-height:100vh; }
     main { margin:auto; width: min(90vw, 900px); }
     h1 { text-align:center; font-weight:600; }
     form { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; }
-    .url-input { flex: 1 1 700px; max-width: 800px; height:56px; font-size:1.1rem; padding:12px 14px; border-radius:8px; border:1px solid #bbb; }
-    button { height:56px; padding:0 20px; font-size:1rem; border-radius:8px; border:1px solid #888; cursor:pointer; }
+    .url-input { flex: 1 1 700px; max-width: 800px; height:56px; font-size:1.1rem; padding:12px 14px; border-radius:8px; }
+    button { height:56px; padding:0 20px; font-size:1rem; border-radius:8px; cursor:pointer; }
     .msg { margin-top:16px; text-align:center; }
-    .msg.error { color: #b00020; }
-    .msg.ok { color: #0b7a0b; }
   </style>
 </head>
 <body>
@@ -59,18 +57,16 @@ const repoPageTpl = `<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{.Title}}</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root { color-scheme: light; }
     body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; display:flex; min-height:100vh; }
     main { margin:auto; width: min(90vw, 900px); }
     h1 { text-align:center; font-weight:700; font-size: clamp(1.5rem, 5vw, 2.5rem); margin-bottom: 16px; }
     form { display:flex; flex-direction:column; gap:12px; }
-    .prompt-input { width:100%; min-height: 220px; font-size:1rem; padding:12px 14px; border-radius:8px; border:1px solid #bbb; resize: vertical; }
+    .prompt-input { width:100%; min-height: 220px; font-size:1rem; padding:12px 14px; border-radius:8px; resize: vertical; }
     .actions { display:flex; gap:12px; align-items:center; }
-    button { height:44px; padding:0 20px; font-size:1rem; border-radius:8px; border:1px solid #888; cursor:pointer; }
-    a.link { text-decoration: none; padding: 10px 12px; border-radius: 8px; border:1px solid #888; }
+    button { height:44px; padding:0 20px; font-size:1rem; border-radius:8px; cursor:pointer; }
+    a.link { text-decoration: none; padding: 10px 12px; border-radius: 8px; }
     .msg { margin-top:8px; text-align:left; }
-    .msg.error { color: #b00020; }
-    .msg.ok { color: #0b7a0b; }
   </style>
 </head>
 <body>
