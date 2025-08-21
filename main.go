@@ -1123,11 +1123,11 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("runHandler: warning: GEMINI_API_KEY not set")
 		}
 	} else {
-		if key := os.Getenv("CLAUDE_API_KEY"); key != "" {
-			cmd.Env = append(os.Environ(), "CLAUDE_API_KEY="+key)
+		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+key)
 		} else {
 			cmd.Env = os.Environ()
-			log.Printf("runHandler: warning: CLAUDE_API_KEY not set")
+			log.Printf("runHandler: warning: ANTHROPIC_API_KEY not set")
 		}
 	}
 	var buf bytes.Buffer
