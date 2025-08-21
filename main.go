@@ -40,6 +40,13 @@ func cloneBaseDir() string {
 	return filepath.Join(*appDir, "clone")
 }
 
+func worktreeBaseDir() string {
+	return filepath.Join(*appDir, "worktree")
+}
+func worktreeDirPath(org, repo, name string) string {
+	return filepath.Join(worktreeBaseDir(), org, repo, name)
+}
+
 // trybook database lives under <dir>/trybook.db
 func dbPath() string {
 	return filepath.Join(*appDir, "trybook.db")
@@ -75,6 +82,7 @@ func initDB() error {
 			org        TEXT NOT NULL,
 			repo       TEXT NOT NULL,
 			branch     TEXT NOT NULL,
+			worktree   TEXT NOT NULL,
 			commit_sha TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 		);
@@ -121,16 +129,31 @@ func genNotebookID() string {
 }
 
 func createNotebook(ctx context.Context, org, repo string) (string, error) {
-	dir := repoDirPath(org, repo)
-	branch, sha, err := currentBranchAndCommit(ctx, dir)
+	cloneDir := repoDirPath(org, repo)
+
+	id := genNotebookID()
+	wtName := "nb-" + id
+	wtDir := worktreeDirPath(org, repo, wtName)
+
+	if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
+		return "", fmt.Errorf("create worktree parent dir: %w", err)
+	}
+
+	// git -C <clone> worktree add -b <wtName> <wtDir>
+	cmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "worktree", "add", "-b", wtName, wtDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("create worktree: %v\n%s", err, string(out))
+	}
+
+	branch, sha, err := currentBranchAndCommit(ctx, wtDir)
 	if err != nil {
 		return "", err
 	}
-	id := genNotebookID()
+
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO notebooks(id, org, repo, branch, commit_sha)
-		VALUES(?, ?, ?, ?, ?)
-	`, id, org, repo, branch, sha)
+		INSERT INTO notebooks(id, org, repo, branch, worktree, commit_sha)
+		VALUES(?, ?, ?, ?, ?, ?)
+	`, id, org, repo, branch, wtName, sha)
 	if err != nil {
 		return "", fmt.Errorf("insert notebook: %w", err)
 	}
@@ -175,19 +198,20 @@ func listNotebooks(ctx context.Context) ([]nbListItem, error) {
 }
 
 type notebookMeta struct {
-	ID     string
-	Org    string
-	Repo   string
-	Branch string
-	SHA    string
+	ID       string
+	Org      string
+	Repo     string
+	Branch   string
+	SHA      string
+	Worktree string // new
 }
 
 func loadNotebook(ctx context.Context, id string) (notebookMeta, []entry, error) {
 	var m notebookMeta
 	err := db.QueryRowContext(ctx, `
-		SELECT id, org, repo, branch, commit_sha
+		SELECT id, org, repo, branch, worktree, commit_sha
 		FROM notebooks WHERE id = ?
-	`, id).Scan(&m.ID, &m.Org, &m.Repo, &m.Branch, &m.SHA)
+	`, id).Scan(&m.ID, &m.Org, &m.Repo, &m.Branch, &m.Worktree, &m.SHA)
 	if err != nil {
 		return m, nil, err
 	}
@@ -721,6 +745,12 @@ func tryHandler(w http.ResponseWriter, r *http.Request) {
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Server cannot create clone dir.", MsgClass: "error"})
 		return
 	}
+	if err := os.MkdirAll(worktreeBaseDir(), 0o755); err != nil {
+		log.Printf("tryHandler: MkdirAll(%q) error: %v", worktreeBaseDir(), err)
+		setHTMLHeaders(w)
+		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Server cannot create worktree dir.", MsgClass: "error"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	log.Printf("tryHandler: ensuring clone at %s", repoDirPath(org, repo))
@@ -943,7 +973,7 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context() // canceled when client aborts (Stop button)
 	cmd := exec.CommandContext(ctx, "gemini", "--prompt", prompt)
-	cmd.Dir = repoDirPath(meta.Org, meta.Repo)
+	cmd.Dir = worktreeDirPath(meta.Org, meta.Repo, meta.Worktree)
 	// Ensure GEMINI_API_KEY is available to the child process
 	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
 		cmd.Env = append(os.Environ(), "GEMINI_API_KEY="+key)
