@@ -475,6 +475,14 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context() // canceled when client aborts (Stop button)
 	cmd := exec.CommandContext(ctx, "gemini", "--prompt", prompt)
 	cmd.Dir = repoDirPath(org, repo)
+	// Ensure GEMINI_API_KEY is available to the child process
+	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+		cmd.Env = append(os.Environ(), "GEMINI_API_KEY="+key)
+	} else {
+		// Keep existing environment; warn if the key is missing
+		cmd.Env = os.Environ()
+		log.Printf("runHandler: warning: GEMINI_API_KEY not set")
+	}
 	fw := flushWriter{w: w, f: f}
 	cmd.Stdout = fw
 	cmd.Stderr = fw
@@ -526,7 +534,7 @@ func main() {
 		Addr:         addr,
 		Handler:      newMux(),
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 0, // no write timeout; needed for streaming
 		IdleTimeout:  60 * time.Second,
 	}
 	errCh := make(chan error, 1)
