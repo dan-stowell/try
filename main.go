@@ -62,7 +62,8 @@ const repoPageTpl = `<!doctype html>
     main { margin:auto; width: min(90vw, 900px); }
     h1 { text-align:center; font-weight:700; font-size: clamp(1.5rem, 5vw, 2.5rem); margin-bottom: 16px; }
     form { display:flex; flex-direction:column; gap:12px; }
-    .prompt-input { width:100%; min-height: 220px; font-size:1rem; padding:12px 14px; border-radius:8px; resize: vertical; }
+    .prompt-input { width:100%; font-size:1rem; padding:12px 14px; border-radius:8px; resize: vertical; }
+    .llm-out { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; padding:12px 14px; border-radius:8px; overflow:auto; }
     .actions { display:flex; gap:12px; align-items:center; }
     button { height:44px; padding:0 20px; font-size:1rem; border-radius:8px; cursor:pointer; }
     a.link { text-decoration: none; padding: 10px 12px; border-radius: 8px; }
@@ -72,10 +73,16 @@ const repoPageTpl = `<!doctype html>
 <body>
   <main>
     <h1>{{.Org}}/{{.Repo}}</h1>
+    {{if .Prompt}}
+      <section class="prompt-view">
+        <textarea class="prompt-input" readonly rows="2">{{.Prompt}}</textarea>
+      </section>
+      {{if .ClaudeOut}}<pre class="llm-out">{{.ClaudeOut}}</pre>{{end}}
+    {{end}}
     <form method="post" action="/prompt" novalidate>
       <input type="hidden" name="org" value="{{.Org}}">
       <input type="hidden" name="repo" value="{{.Repo}}">
-      <textarea name="prompt" class="prompt-input" placeholder="Enter a prompt..."></textarea>
+      <textarea name="prompt" class="prompt-input" placeholder="Enter a prompt..." rows="2"></textarea>
       <div class="actions">
         <button type="submit">Run</button>
         <a class="link" href="/">Back</a>
@@ -88,11 +95,13 @@ const repoPageTpl = `<!doctype html>
 var repoTpl = template.Must(template.New("repo").Parse(repoPageTpl))
 
 type viewModel struct {
-	Title    string
-	Message  string
-	MsgClass string
-	Org      string
-	Repo     string
+	Title     string
+	Message   string
+	MsgClass  string
+	Org       string
+	Repo      string
+	Prompt    string
+	ClaudeOut string
 }
 
 func setHTMLHeaders(w http.ResponseWriter) {
@@ -292,13 +301,41 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	vm := viewModel{
-		Title:    "Trybook - " + org + "/" + repo,
-		Org:      org,
-		Repo:     repo,
-		Message:  "Prompt submitted (not implemented).",
-		MsgClass: "ok",
+	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	if prompt == "" {
+		vm := viewModel{
+			Title:    "Trybook - " + org + "/" + repo,
+			Org:      org,
+			Repo:     repo,
+			Message:  "Please enter a prompt.",
+			MsgClass: "error",
+		}
+		setHTMLHeaders(w)
+		_ = repoTpl.Execute(w, vm)
+		return
 	}
+
+	// Run `claude --print` in the repo directory, feeding the prompt on stdin.
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "claude", "--print")
+	cmd.Dir = repoDirPath(org, repo)
+	cmd.Stdin = strings.NewReader(prompt)
+	out, err := cmd.CombinedOutput()
+
+	vm := viewModel{
+		Title:     "Trybook - " + org + "/" + repo,
+		Org:       org,
+		Repo:      repo,
+		ClaudeOut: string(out),
+		Prompt:    prompt,
+		MsgClass:  "ok",
+	}
+	if err != nil {
+		vm.Message = "claude failed: " + err.Error()
+		vm.MsgClass = "error"
+	}
+
 	setHTMLHeaders(w)
 	_ = repoTpl.Execute(w, vm)
 }
