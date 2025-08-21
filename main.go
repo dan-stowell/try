@@ -22,6 +22,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"github.com/creack/pty"
 	_ "modernc.org/sqlite"
 )
 
@@ -386,6 +387,7 @@ const repoPageTpl = `<!doctype html>
     .status-badge { font-size:0.9rem; color:#6b7280; }
     .status-badge.done { color:#16a34a; }
     .status-badge.thinking { color:#6b7280; }
+    .status-badge.waiting { color:#6b7280; font-style: italic; }
     .toggle { height:28px; padding: 0 10px; font-size: 0.9rem; }
     .preview { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; color:#374151; }
     .actions { display:flex; gap:12px; align-items:center; }
@@ -527,6 +529,11 @@ const repoPageTpl = `<!doctype html>
             var outEl = document.getElementById('out-' + model + '-{{.PendingIdx}}');
             var prevEl = document.getElementById('prev-' + model + '-{{.PendingIdx}}');
             var boxStatusEl = document.getElementById('status-' + model + '-{{.PendingIdx}}');
+            var firstChunk = true;
+            if (model === 'aider' && boxStatusEl) {
+              boxStatusEl.textContent = 'waiting...';
+              boxStatusEl.className = 'status-badge waiting';
+            }
             function updatePreview(txt){
               if (!prevEl) return;
               var t = txt || '';
@@ -554,6 +561,13 @@ const repoPageTpl = `<!doctype html>
                 return reader.read().then(function(result){
                   if (result.done) return;
                   outEl.textContent += dec.decode(result.value, {stream:true});
+                  if (firstChunk) {
+                    firstChunk = false;
+                    if (model === 'aider' && boxStatusEl) {
+                      boxStatusEl.textContent = 'responding...';
+                      boxStatusEl.className = 'status-badge';
+                    }
+                  }
                   updatePreview(outEl.textContent);
                   outEl.scrollTop = outEl.scrollHeight;
                   if (stickToBottom && outEl.scrollIntoView) outEl.scrollIntoView({block:'end'});
@@ -1236,6 +1250,7 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 			"--yes-always",
 			"--auto-commit",
 			"--auto-accept-architect",
+			"--no-pretty",
 			"--message", prompt,
 		)
 	} else { // router
@@ -1276,45 +1291,87 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	fw := flushWriter{w: w, f: f}
 	mw := io.MultiWriter(&buf, fw)
-	cmd.Stdout = mw
-	cmd.Stderr = mw
+	// For aider we stream via PTY, so don’t attach Stdout/Stderr here
+	if model != "aider" {
+		cmd.Stdout = mw
+		cmd.Stderr = mw
+	}
 
 	log.Printf("runHandler: running model=%s in %s", model, cmd.Dir)
-	if err := cmd.Start(); err != nil {
-		log.Printf("runHandler: %s start error: %v", model, err)
-		_, _ = w.Write([]byte("error: failed to start " + model + ": " + err.Error() + "\n"))
-		f.Flush()
-		return
-	}
-	if err := cmd.Wait(); err != nil {
-		log.Printf("runHandler: %s exited with error: %v", model, err)
+	if model == "aider" {
+		pt, err := pty.Start(cmd)
+		if err != nil {
+			log.Printf("runHandler: %s start error: %v", model, err)
+			_, _ = w.Write([]byte("error: failed to start " + model + ": " + err.Error() + "\n"))
+			f.Flush()
+			return
+		}
+		defer pt.Close()
+
+		// Kill aider if client aborts
+		go func() {
+			<-ctx.Done()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = pt.Close()
+		}()
+
+		// Stream PTY output to client and buffer
+		if _, err := io.Copy(mw, pt); err != nil {
+			log.Printf("runHandler: aider PTY copy error: %v", err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			log.Printf("runHandler: %s exited with error: %v", model, err)
+			_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
+			_, _ = w.Write([]byte("\n[" + model + " exited with error: " + err.Error() + "]\n"))
+			f.Flush()
+			return
+		}
+		log.Printf("runHandler: %s complete", model)
 		_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
-		_, _ = w.Write([]byte("\n[" + model + " exited with error: " + err.Error() + "]\n"))
-		f.Flush()
-		return
-	}
-	if model == "router" {
-		// Parse decision and persist intent
-		s := strings.ToLower(strings.TrimSpace(buf.String()))
-		intent := ""
-		if s == "edit" || strings.HasPrefix(s, "edit") {
-			intent = "edit"
-		} else if s == "question" || strings.HasPrefix(s, "question") {
-			intent = "question"
-		}
-		if err := setNotebookEntryIntent(r.Context(), nbID, idx, intent); err != nil {
-			log.Printf("runHandler: set intent error: %v", err)
-		}
-		// No output column for router; still write trailing [done] for client
 		_, _ = w.Write([]byte("\n[done]\n"))
 		f.Flush()
+		return
+	} else {
+		if err := cmd.Start(); err != nil {
+			log.Printf("runHandler: %s start error: %v", model, err)
+			_, _ = w.Write([]byte("error: failed to start " + model + ": " + err.Error() + "\n"))
+			f.Flush()
+			return
+		}
+		if err := cmd.Wait(); err != nil {
+			log.Printf("runHandler: %s exited with error: %v", model, err)
+			_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
+			_, _ = w.Write([]byte("\n[" + model + " exited with error: " + err.Error() + "]\n"))
+			f.Flush()
+			return
+		}
+		if model == "router" {
+			// Parse decision and persist intent
+			s := strings.ToLower(strings.TrimSpace(buf.String()))
+			intent := ""
+			if s == "edit" || strings.HasPrefix(s, "edit") {
+				intent = "edit"
+			} else if s == "question" || strings.HasPrefix(s, "question") {
+				intent = "question"
+			}
+			if err := setNotebookEntryIntent(r.Context(), nbID, idx, intent); err != nil {
+				log.Printf("runHandler: set intent error: %v", err)
+			}
+			// No output column for router; still write trailing [done] for client
+			_, _ = w.Write([]byte("\n[done]\n"))
+			f.Flush()
+			log.Printf("runHandler: %s complete", model)
+			return
+		}
 		log.Printf("runHandler: %s complete", model)
+		_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
+		_, _ = w.Write([]byte("\n[done]\n"))
+		f.Flush()
 		return
 	}
-	log.Printf("runHandler: %s complete", model)
-	_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
-	_, _ = w.Write([]byte("\n[done]\n"))
-	f.Flush()
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
