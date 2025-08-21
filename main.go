@@ -477,7 +477,7 @@ func tryHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := os.MkdirAll(cloneBaseDir(), 0o755); err != nil {
-		log.Printf("tryHandler: MkdirAll(%q) error: %v", *cloneDir, err)
+		log.Printf("tryHandler: MkdirAll(%q) error: %v", cloneBaseDir(), err)
 		setHTMLHeaders(w)
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Server cannot create clone dir.", MsgClass: "error"})
 		return
