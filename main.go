@@ -22,6 +22,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"github.com/creack/pty"
 	_ "modernc.org/sqlite"
 )
 
@@ -99,6 +100,8 @@ func initDB() error {
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("schema: %w", err)
 	}
+	_, _ = db.Exec(`ALTER TABLE notebook_entries ADD COLUMN output_claude TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE notebook_entries ADD COLUMN intent TEXT NOT NULL DEFAULT ''`)
 	return nil
 }
 
@@ -216,7 +219,7 @@ func loadNotebook(ctx context.Context, id string) (notebookMeta, []entry, error)
 		return m, nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT idx, prompt, output
+		SELECT idx, prompt, output, output_claude, intent
 		FROM notebook_entries
 		WHERE notebook_id = ?
 		ORDER BY idx ASC
@@ -229,7 +232,7 @@ func loadNotebook(ctx context.Context, id string) (notebookMeta, []entry, error)
 	for rows.Next() {
 		var idx int
 		var e entry
-		if err := rows.Scan(&idx, &e.Prompt, &e.Output); err != nil {
+		if err := rows.Scan(&idx, &e.Prompt, &e.Output, &e.OutputClaude, &e.Intent); err != nil {
 			return m, nil, err
 		}
 		es = append(es, e)
@@ -261,6 +264,32 @@ func setNotebookEntryOutput(ctx context.Context, nbID string, idx int, out strin
 		SET output = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 		WHERE notebook_id = ? AND idx = ?
 	`, out, nbID, idx)
+	return err
+}
+
+func setNotebookEntryOutputForModel(ctx context.Context, nbID string, idx int, model, out string) error {
+	col := "output"
+	if strings.ToLower(model) == "claude" {
+		col = "output_claude"
+	}
+	_, err := db.ExecContext(ctx, `
+		UPDATE notebook_entries
+		SET `+col+` = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+		WHERE notebook_id = ? AND idx = ?
+	`, out, nbID, idx)
+	return err
+}
+
+func setNotebookEntryIntent(ctx context.Context, nbID string, idx int, intent string) error {
+	intent = strings.ToLower(strings.TrimSpace(intent))
+	if intent != "edit" && intent != "question" {
+		intent = ""
+	}
+	_, err := db.ExecContext(ctx, `
+		UPDATE notebook_entries
+		SET intent = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+		WHERE notebook_id = ? AND idx = ?
+	`, intent, nbID, idx)
 	return err
 }
 
@@ -353,26 +382,104 @@ const repoPageTpl = `<!doctype html>
     form { display:flex; flex-direction:column; gap:12px; }
     .prompt-input { width:100%; font-size:1rem; padding:12px 14px; border-radius:8px; resize: vertical; }
     .llm-out { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; padding:12px 14px; border-radius:8px; overflow:auto; }
+    .outbox { border: 1px solid #e5e7eb; background: #f9fafb; border-radius:8px; padding:10px 12px; margin:8px 0 16px; }
+    .box-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+    .status-badge { font-size:0.9rem; color:#6b7280; }
+    .status-badge.done { color:#16a34a; }
+    .status-badge.thinking { color:#6b7280; }
+    .status-badge.waiting { color:#6b7280; font-style: italic; }
+    .toggle { height:28px; padding: 0 10px; font-size: 0.9rem; }
+    .preview { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; color:#374151; }
     .actions { display:flex; gap:12px; align-items:center; }
     button { height:44px; padding:0 20px; font-size:1rem; border-radius:8px; cursor:pointer; }
     a.link { text-decoration: none; padding: 10px 12px; border-radius: 8px; }
     .msg { margin-top:8px; text-align:left; }
+    .outbox.gemini { border-color: #dbeafe; }
+    .outbox.claude { border-color: #f3e8ff; }
+    .model-tag { font-size:0.85rem; color:#6b7280; margin-right:8px; text-transform: uppercase; letter-spacing:.02em; }
+    .outbox.aider { border-color: #fee2e2; }
   </style>
 </head>
 <body>
   <main>
     <h1>{{.Org}}/{{.Repo}}</h1>
-    <p><small>Branch: {{.Branch}} &middot; Commit: {{.CommitShort}}</small></p>
+    <p><small>Branch: {{.Branch}} &middot; Commit: <span id="commitShort">{{.CommitShort}}</span></small></p>
     {{range $i, $e := .Entries}}
       <section class="prompt-view">
         <textarea class="prompt-input" readonly rows="2">{{ $e.Prompt }}</textarea>
       </section>
-      <pre id="out-{{$i}}" class="llm-out">{{ $e.Output }}</pre>
+  {{if and $.HasPending (eq $i $.PendingIdx)}}
+    <!-- Pending entry: initially hide all model boxes; router will decide -->
+    <div class="outbox aider" id="box-aider-{{$i}}" data-model="aider" data-i="{{$i}}" style="display:none">
+      <div class="box-header">
+        <span class="model-tag">aider</span>
+        <span id="status-aider-{{$i}}" class="status-badge thinking">thinking</span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="aider">Expand</button>
+      </div>
+      <pre id="prev-aider-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-aider-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+    </div>
+    <div class="outbox claude" id="box-claude-{{$i}}" data-model="claude" data-i="{{$i}}" style="display:none">
+      <div class="box-header">
+        <span class="model-tag">claude</span>
+        <span id="status-claude-{{$i}}" class="status-badge thinking">thinking</span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="claude">Expand</button>
+      </div>
+      <pre id="prev-claude-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-claude-{{$i}}" class="llm-out" hidden>{{ $e.OutputClaude }}</pre>
+    </div>
+    <div class="outbox gemini" id="box-gemini-{{$i}}" data-model="gemini" data-i="{{$i}}" style="display:none">
+      <div class="box-header">
+        <span class="model-tag">gemini</span>
+        <span id="status-gemini-{{$i}}" class="status-badge thinking">thinking</span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="gemini">Expand</button>
+      </div>
+      <pre id="prev-gemini-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-gemini-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+    </div>
+  {{else if eq $e.Intent "edit"}}
+    <!-- Completed edit entries show the Aider placeholder -->
+    <div class="outbox aider" id="box-aider-{{$i}}" data-model="aider" data-i="{{$i}}">
+      <div class="box-header">
+        <span class="model-tag">aider</span>
+        <span id="status-aider-{{$i}}" class="status-badge {{if $e.Output}}done{{else}}thinking{{end}}">
+          {{if $e.Output}}done{{else}}thinking{{end}}
+        </span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="aider">Expand</button>
+      </div>
+      <pre id="prev-aider-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-aider-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+    </div>
+  {{else}}
+    <!-- Completed question entries show both models -->
+    <div class="outbox claude" id="box-claude-{{$i}}" data-model="claude" data-i="{{$i}}">
+      <div class="box-header">
+        <span class="model-tag">claude</span>
+        <span id="status-claude-{{$i}}" class="status-badge {{if $e.OutputClaude}}done{{else}}thinking{{end}}">
+          {{if $e.OutputClaude}}done{{else}}thinking{{end}}
+        </span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="claude">Expand</button>
+      </div>
+      <pre id="prev-claude-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-claude-{{$i}}" class="llm-out" hidden>{{ $e.OutputClaude }}</pre>
+    </div>
+    <div class="outbox gemini" id="box-gemini-{{$i}}" data-model="gemini" data-i="{{$i}}">
+      <div class="box-header">
+        <span class="model-tag">gemini</span>
+        <span id="status-gemini-{{$i}}" class="status-badge {{if $e.Output}}done{{else}}thinking{{end}}">
+          {{if $e.Output}}done{{else}}thinking{{end}}
+        </span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="gemini">Expand</button>
+      </div>
+      <pre id="prev-gemini-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-gemini-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+    </div>
+  {{end}}
     {{end}}
     {{if .HasPending}}
       <div id="pending" class="actions">
         <button id="stopBtn" type="button">Stop</button>
-        <span id="status">Running...</span>
+        <span id="runStatus">Running...</span>
       </div>
       <form id="runForm" method="post" action="/run" style="display:none">
         <input type="hidden" name="nb" value="{{.NotebookID}}">
@@ -381,63 +488,190 @@ const repoPageTpl = `<!doctype html>
       <script>
         (function(){
           var runForm = document.getElementById('runForm');
-          var outEl = document.getElementById('out-{{.PendingIdx}}');
           var pendingEl = document.getElementById('pending');
-          if (outEl && outEl.scrollIntoView) {
-            outEl.scrollIntoView({block:'end'});
-          }
-          var statusEl = document.getElementById('status');
+          var runStatusEl = document.getElementById('runStatus');
           var stopBtn = document.getElementById('stopBtn');
           var stickToBottom = true;
           window.addEventListener('scroll', function(){
             var nearBottom = (window.scrollY + window.innerHeight) >= (document.documentElement.scrollHeight - 40);
             stickToBottom = nearBottom;
           });
-          if (!runForm || !outEl) return;
-          var controller = new AbortController();
-          stopBtn.addEventListener('click', function(){
-            stopBtn.disabled = true;
-            statusEl.textContent = 'Stopping...';
-            controller.abort();
-          });
-          statusEl.textContent = 'Running...';
-          var fd = new FormData(runForm);
-          var body = new URLSearchParams(fd);
-          fetch('/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-            body: body.toString(),
-            signal: controller.signal
-          })
+          if (!runForm) return;
+
+          var controllers = {};
+          var abortedAll = false;
+          var remaining = 0; // will set to 2 if we start both models
+
+          function refreshCommit(){
+            fetch('/api/head?nb={{.NotebookID}}')
+              .then(function(res){ return res.text(); })
+              .then(function(txt){
+                var el = document.getElementById('commitShort');
+                if (el && txt) el.textContent = (txt || '').trim();
+              })
+              .catch(function(){ /* ignore */ });
+          }
+
+          function showNextPromptAndRemovePending(){
+            refreshCommit();
+            if (pendingEl && pendingEl.remove) { pendingEl.remove(); }
+            else if (pendingEl) { pendingEl.style.display = 'none'; }
+            var next = document.getElementById('nextPrompt');
+            if (next) {
+              next.style.display = '';
+              var ta = next.querySelector('textarea');
+              if (ta) ta.focus();
+            }
+            if (stopBtn) stopBtn.disabled = true;
+          }
+
+          function startModel(model){
+            var outEl = document.getElementById('out-' + model + '-{{.PendingIdx}}');
+            var prevEl = document.getElementById('prev-' + model + '-{{.PendingIdx}}');
+            var boxStatusEl = document.getElementById('status-' + model + '-{{.PendingIdx}}');
+            var firstChunk = true;
+            if (model === 'aider' && boxStatusEl) {
+              boxStatusEl.textContent = 'waiting...';
+              boxStatusEl.className = 'status-badge waiting';
+            }
+            function updatePreview(txt){
+              if (!prevEl) return;
+              var t = txt || '';
+              prevEl.textContent = t ? t.slice(-80) : 'thinking';
+            }
+            updatePreview(outEl ? outEl.textContent : '');
+
+            var controller = new AbortController();
+            controllers[model] = controller;
+
+            var fd = new FormData(runForm);
+            fd.append('model', model);
+            var body = new URLSearchParams(fd);
+            runStatusEl.textContent = 'Running...';
+            fetch('/run', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+              body: body.toString(),
+              signal: controller.signal
+            })
             .then(function(res){
               var reader = res.body.getReader();
               var dec = new TextDecoder();
-              function read() {
+              function read(){
                 return reader.read().then(function(result){
                   if (result.done) return;
                   outEl.textContent += dec.decode(result.value, {stream:true});
-                  outEl.scrollTop = outEl.scrollHeight;
-                  if (stickToBottom && outEl.scrollIntoView) {
-                    outEl.scrollIntoView({block:'end'});
+                  if (firstChunk) {
+                    firstChunk = false;
+                    if (model === 'aider' && boxStatusEl) {
+                      boxStatusEl.textContent = 'responding...';
+                      boxStatusEl.className = 'status-badge';
+                    }
                   }
+                  updatePreview(outEl.textContent);
+                  outEl.scrollTop = outEl.scrollHeight;
+                  if (stickToBottom && outEl.scrollIntoView) outEl.scrollIntoView({block:'end'});
                   return read();
                 });
               }
               return read();
             })
             .catch(function(err){
-              outEl.textContent += '\n[stream error] ' + err + '\n';
+              if (boxStatusEl) { boxStatusEl.textContent = 'stopped'; boxStatusEl.className = 'status-badge'; }
+              if (!abortedAll && outEl) {
+                outEl.textContent += '\n[stream error] ' + err + '\n';
+              }
             })
             .finally(function(){
-              statusEl.textContent = 'Done';
-              var next = document.getElementById('nextPrompt');
-              if (next) {
-                next.style.display = '';
-                var ta = next.querySelector('textarea');
-                if (ta) ta.focus();
+              if (boxStatusEl && !abortedAll) {
+                boxStatusEl.textContent = 'done';
+                boxStatusEl.className = 'status-badge done';
               }
-              stopBtn.disabled = true;
+              remaining--;
+              if (remaining === 0) {
+                showNextPromptAndRemovePending();
+              }
             });
+          }
+
+          function startRouter(){
+            var controller = new AbortController();
+            controllers['router'] = controller;
+            runStatusEl.textContent = 'Thinking...';
+            var fd = new FormData(runForm);
+            fd.append('model', 'router');
+            var body = new URLSearchParams(fd);
+            var routerOut = '';
+            fetch('/run', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+              body: body.toString(),
+              signal: controller.signal
+            })
+            .then(function(res){
+              var reader = res.body.getReader();
+              var dec = new TextDecoder();
+              function read(){
+                return reader.read().then(function(result){
+                  if (result.done) return;
+                  routerOut += dec.decode(result.value, {stream:true});
+                  return read();
+                });
+              }
+              return read();
+            })
+            .catch(function(err){
+              if (!abortedAll) {
+                routerOut += '\n[router error] ' + err + '\n';
+              }
+            })
+            .finally(function(){
+              if (abortedAll) {
+                showNextPromptAndRemovePending();
+                return;
+              }
+              var s = (routerOut || '').toLowerCase();
+              var decision = 'question';
+              if (s.indexOf('edit') >= 0 && s.indexOf('question') < 0) decision = 'edit';
+              if (s.trim() === 'edit') decision = 'edit';
+              if (decision === 'edit') {
+                // Show Aider box and start streaming
+                var ba = document.getElementById('box-aider-{{.PendingIdx}}');
+                if (ba) ba.style.display = '';
+                var st = document.getElementById('status-aider-{{.PendingIdx}}');
+                if (st) { st.textContent = 'thinking'; st.className = 'status-badge thinking'; }
+                remaining = 1;
+                startModel('aider');
+              } else {
+                // Show model boxes and start both
+                var bc = document.getElementById('box-claude-{{.PendingIdx}}');
+                var bg = document.getElementById('box-gemini-{{.PendingIdx}}');
+                if (bc) bc.style.display = '';
+                if (bg) bg.style.display = '';
+                remaining = 2;
+                startModel('claude');
+                startModel('gemini');
+              }
+            });
+          }
+
+          stopBtn.addEventListener('click', function(){
+            abortedAll = true;
+            stopBtn.disabled = true;
+            runStatusEl.textContent = 'Stopping...';
+            Object.keys(controllers).forEach(function(k){
+              try { controllers[k].abort(); } catch(e){}
+            });
+            // Mark any visible boxes as stopped
+            ['claude','gemini','aider'].forEach(function(m){
+              var el = document.getElementById('status-' + m + '-{{.PendingIdx}}');
+              if (el) { el.textContent = 'stopped'; el.className = 'status-badge'; }
+            });
+            showNextPromptAndRemovePending();
+          });
+
+          // Kick off router first
+          startRouter();
         })();
       </script>
     {{end}}
@@ -453,10 +687,6 @@ const repoPageTpl = `<!doctype html>
       (function(){
         var form = document.getElementById('nextPrompt');
         if (!form) return;
-        form.addEventListener('submit', function(){
-          // Ensure the next navigation lands at the pending section
-          form.action = (form.action.split('#')[0] || '/prompt') + '#pending';
-        });
         var ta = form.querySelector('textarea[name="prompt"]');
         if (!ta) return;
         ta.addEventListener('keydown', function(e){
@@ -464,6 +694,42 @@ const repoPageTpl = `<!doctype html>
             e.preventDefault();
             if (form.requestSubmit) form.requestSubmit(); else form.submit();
           }
+        });
+      })();
+    </script>
+    <script>
+      (function(){
+        function updatePreviewFor(model, i){
+          var out = document.getElementById('out-' + model + '-' + i);
+          var prev = document.getElementById('prev-' + model + '-' + i);
+          if (!out || !prev) return;
+          var txt = out.textContent || '';
+          prev.textContent = txt ? txt.slice(-80) : 'thinking';
+        }
+        document.querySelectorAll('.outbox').forEach(function(box){
+          var i = box.getAttribute('data-i');
+          var model = box.getAttribute('data-model');
+          if (i && model) updatePreviewFor(model, i);
+        });
+        document.querySelectorAll('.outbox .toggle').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            var i = btn.getAttribute('data-i');
+            var model = btn.getAttribute('data-model');
+            var out = document.getElementById('out-' + model + '-' + i);
+            var prev = document.getElementById('prev-' + model + '-' + i);
+            if (!out || !prev) return;
+            var hidden = out.hasAttribute('hidden');
+            if (hidden) {
+              out.removeAttribute('hidden');
+              prev.style.display = 'none';
+              btn.textContent = 'Collapse';
+            } else {
+              out.setAttribute('hidden', 'hidden');
+              prev.style.display = '';
+              btn.textContent = 'Expand';
+              updatePreviewFor(model, i);
+            }
+          });
         });
       })();
     </script>
@@ -630,8 +896,10 @@ func isLikelyGitHubURL(s string) bool {
 // In-memory notebook
 
 type entry struct {
-	Prompt string
-	Output string
+	Prompt       string
+	Output       string
+	OutputClaude string
+	Intent       string
 }
 
 var (
@@ -820,6 +1088,12 @@ func notebookHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	pendingIdx := -1
+	if p := r.URL.Query().Get("pending"); p != "" {
+		if i, err := strconv.Atoi(p); err == nil {
+			pendingIdx = i
+		}
+	}
 	vm := viewModel{
 		Title:       "Trybook - " + meta.Org + "/" + meta.Repo,
 		Org:         meta.Org,
@@ -827,8 +1101,8 @@ func notebookHandler(w http.ResponseWriter, r *http.Request) {
 		Branch:      meta.Branch,
 		CommitShort: func() string { if len(meta.SHA) >= 7 { return meta.SHA[:7] } else { return meta.SHA } }(),
 		Entries:     entries,
-		PendingIdx:  -1,
-		HasPending:  false,
+		PendingIdx:  pendingIdx,
+		HasPending:  pendingIdx >= 0,
 		NotebookID:  meta.ID,
 	}
 	setHTMLHeaders(w)
@@ -882,25 +1156,8 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	meta, _, err := loadNotebook(r.Context(), nbID)
-	if err != nil {
-		log.Printf("promptHandler: loadNotebook error: %v", err)
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-	vm := viewModel{
-		Title:       "Trybook - " + meta.Org + "/" + meta.Repo,
-		Org:         meta.Org,
-		Repo:        meta.Repo,
-		Branch:      meta.Branch,
-		NotebookID:  nbID,
-		Entries:     func() []entry { _, es, _ := loadNotebook(r.Context(), nbID); return es }(),
-		PendingIdx:  idx,
-		HasPending:  true,
-		MsgClass:    "ok",
-	}
-	setHTMLHeaders(w)
-	_ = repoTpl.Execute(w, vm)
+	http.Redirect(w, r, "/n/"+nbID+"?pending="+strconv.Itoa(idx)+"#pending", http.StatusSeeOther)
+	return
 }
 
 func runHandler(w http.ResponseWriter, r *http.Request) {
@@ -939,6 +1196,14 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	model := strings.TrimSpace(r.FormValue("model"))
+	if model == "" {
+		model = "gemini"
+	}
+	if model != "gemini" && model != "claude" && model != "router" && model != "aider" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	// Load notebook meta
 	meta, _, err := loadNotebook(r.Context(), nbID)
 	if err != nil {
@@ -968,44 +1233,146 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inform client immediately
-	_, _ = w.Write([]byte("Starting gemini...\n\n"))
+	_, _ = w.Write([]byte("Starting " + model + "...\n\n"))
 	f.Flush()
 
 	ctx := r.Context() // canceled when client aborts (Stop button)
-	cmd := exec.CommandContext(ctx, "gemini", "--prompt", prompt)
+	var cmd *exec.Cmd
+	if model == "gemini" {
+		cmd = exec.CommandContext(ctx, "gemini", "--prompt", prompt)
+	} else if model == "claude" {
+		cmd = exec.CommandContext(ctx, "claude", "--print")
+		cmd.Stdin = strings.NewReader(prompt)
+	} else if model == "aider" {
+		cmd = exec.CommandContext(ctx, "aider",
+			"--model", "openai/gpt-5",
+			"--architect",
+			"--subtree-only",
+			"--yes-always",
+			"--auto-commits",
+			"--auto-accept-architect",
+			"--no-pretty",
+			"--message", prompt,
+		)
+	} else { // router
+		questionPrompt := "Is the following prompt asking an informational question or requesting edits to the code? Please respond 'question' or 'edit' and nothing else: " + prompt
+		cmd = exec.CommandContext(ctx, "llm", "--model", "gpt-5-nano", questionPrompt)
+	}
 	cmd.Dir = worktreeDirPath(meta.Org, meta.Repo, meta.Worktree)
-	// Ensure GEMINI_API_KEY is available to the child process
-	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
-		cmd.Env = append(os.Environ(), "GEMINI_API_KEY="+key)
-	} else {
-		// Keep existing environment; warn if the key is missing
-		cmd.Env = os.Environ()
-		log.Printf("runHandler: warning: GEMINI_API_KEY not set")
+	// Ensure API keys are available to the child process
+	if model == "gemini" {
+		if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "GEMINI_API_KEY="+key)
+		} else {
+			cmd.Env = os.Environ()
+			log.Printf("runHandler: warning: GEMINI_API_KEY not set")
+		}
+	} else if model == "claude" {
+		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+key)
+		} else {
+			cmd.Env = os.Environ()
+			log.Printf("runHandler: warning: ANTHROPIC_API_KEY not set")
+		}
+	} else if model == "aider" {
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "OPENAI_API_KEY="+key)
+		} else {
+			cmd.Env = os.Environ()
+			log.Printf("runHandler: warning: OPENAI_API_KEY not set")
+		}
+	} else { // router
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "OPENAI_API_KEY="+key)
+		} else {
+			cmd.Env = os.Environ()
+			log.Printf("runHandler: warning: OPENAI_API_KEY not set")
+		}
 	}
 	var buf bytes.Buffer
 	fw := flushWriter{w: w, f: f}
 	mw := io.MultiWriter(&buf, fw)
-	cmd.Stdout = mw
-	cmd.Stderr = mw
+	// For aider we stream via PTY, so don’t attach Stdout/Stderr here
+	if model != "aider" {
+		cmd.Stdout = mw
+		cmd.Stderr = mw
+	}
 
-	log.Printf("runHandler: running `gemini --prompt` in %s", cmd.Dir)
-	if err := cmd.Start(); err != nil {
-		log.Printf("runHandler: start error: %v", err)
-		_, _ = w.Write([]byte("error: failed to start gemini: " + err.Error() + "\n"))
+	log.Printf("runHandler: running model=%s in %s", model, cmd.Dir)
+	if model == "aider" {
+		pt, err := pty.Start(cmd)
+		if err != nil {
+			log.Printf("runHandler: %s start error: %v", model, err)
+			_, _ = w.Write([]byte("error: failed to start " + model + ": " + err.Error() + "\n"))
+			f.Flush()
+			return
+		}
+		defer pt.Close()
+
+		// Kill aider if client aborts
+		go func() {
+			<-ctx.Done()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = pt.Close()
+		}()
+
+		// Stream PTY output to client and buffer
+		if _, err := io.Copy(mw, pt); err != nil {
+			log.Printf("runHandler: aider PTY copy error: %v", err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			log.Printf("runHandler: %s exited with error: %v", model, err)
+			_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
+			_, _ = w.Write([]byte("\n[" + model + " exited with error: " + err.Error() + "]\n"))
+			f.Flush()
+			return
+		}
+		log.Printf("runHandler: %s complete", model)
+		_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
+		_, _ = w.Write([]byte("\n[done]\n"))
+		f.Flush()
+		return
+	} else {
+		if err := cmd.Start(); err != nil {
+			log.Printf("runHandler: %s start error: %v", model, err)
+			_, _ = w.Write([]byte("error: failed to start " + model + ": " + err.Error() + "\n"))
+			f.Flush()
+			return
+		}
+		if err := cmd.Wait(); err != nil {
+			log.Printf("runHandler: %s exited with error: %v", model, err)
+			_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
+			_, _ = w.Write([]byte("\n[" + model + " exited with error: " + err.Error() + "]\n"))
+			f.Flush()
+			return
+		}
+		if model == "router" {
+			// Parse decision and persist intent
+			s := strings.ToLower(strings.TrimSpace(buf.String()))
+			intent := ""
+			if s == "edit" || strings.HasPrefix(s, "edit") {
+				intent = "edit"
+			} else if s == "question" || strings.HasPrefix(s, "question") {
+				intent = "question"
+			}
+			if err := setNotebookEntryIntent(r.Context(), nbID, idx, intent); err != nil {
+				log.Printf("runHandler: set intent error: %v", err)
+			}
+			// No output column for router; still write trailing [done] for client
+			_, _ = w.Write([]byte("\n[done]\n"))
+			f.Flush()
+			log.Printf("runHandler: %s complete", model)
+			return
+		}
+		log.Printf("runHandler: %s complete", model)
+		_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
+		_, _ = w.Write([]byte("\n[done]\n"))
 		f.Flush()
 		return
 	}
-	if err := cmd.Wait(); err != nil {
-		log.Printf("runHandler: gemini exited with error: %v", err)
-		_ = setNotebookEntryOutput(r.Context(), nbID, idx, buf.String())
-		_, _ = w.Write([]byte("\n[gemini exited with error: " + err.Error() + "]\n"))
-		f.Flush()
-		return
-	}
-	log.Printf("runHandler: gemini complete")
-	_ = setNotebookEntryOutput(r.Context(), nbID, idx, buf.String())
-	_, _ = w.Write([]byte("\n[done]\n"))
-	f.Flush()
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -1013,6 +1380,33 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func nbHeadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nbID := strings.TrimSpace(r.URL.Query().Get("nb"))
+	if !isSafeToken(nbID) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	meta, _, err := loadNotebook(r.Context(), nbID)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	ctx := r.Context()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--short=7", "HEAD")
+	cmd.Dir = worktreeDirPath(meta.Org, meta.Repo, meta.Worktree)
+	out, err := cmd.Output()
+	if err != nil {
+		http.Error(w, "error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(strings.TrimSpace(string(out))))
 }
 
 func newMux() http.Handler {
@@ -1023,6 +1417,7 @@ func newMux() http.Handler {
 	mux.HandleFunc("/n/", notebookHandler)
 	mux.HandleFunc("/prompt", promptHandler)
 	mux.HandleFunc("/run", runHandler)
+	mux.HandleFunc("/api/head", nbHeadHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	return mux
 }
