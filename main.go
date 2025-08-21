@@ -1123,19 +1123,19 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("runHandler: running model=%s in %s", model, cmd.Dir)
 	if err := cmd.Start(); err != nil {
-		log.Printf("runHandler: start error: %v", err)
-		_, _ = w.Write([]byte("error: failed to start gemini: " + err.Error() + "\n"))
+		log.Printf("runHandler: %s start error: %v", model, err)
+		_, _ = w.Write([]byte("error: failed to start " + model + ": " + err.Error() + "\n"))
 		f.Flush()
 		return
 	}
 	if err := cmd.Wait(); err != nil {
-		log.Printf("runHandler: gemini exited with error: %v", err)
+		log.Printf("runHandler: %s exited with error: %v", model, err)
 		_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
-		_, _ = w.Write([]byte("\n[gemini exited with error: " + err.Error() + "]\n"))
+		_, _ = w.Write([]byte("\n[" + model + " exited with error: " + err.Error() + "]\n"))
 		f.Flush()
 		return
 	}
-	log.Printf("runHandler: gemini complete")
+	log.Printf("runHandler: %s complete", model)
 	_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
 	_, _ = w.Write([]byte("\n[done]\n"))
 	f.Flush()
