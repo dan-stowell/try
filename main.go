@@ -391,17 +391,6 @@ const repoPageTpl = `<!doctype html>
       <section class="prompt-view">
         <textarea class="prompt-input" readonly rows="2">{{ $e.Prompt }}</textarea>
       </section>
-      <div class="outbox gemini" id="box-gemini-{{$i}}" data-model="gemini" data-i="{{$i}}">
-        <div class="box-header">
-          <span class="model-tag">gemini</span>
-          <span id="status-gemini-{{$i}}" class="status-badge {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}">
-            {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}
-          </span>
-          <button type="button" class="toggle" data-i="{{$i}}" data-model="gemini">Expand</button>
-        </div>
-        <pre id="prev-gemini-{{$i}}" class="preview">thinking</pre>
-        <pre id="out-gemini-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
-      </div>
       <div class="outbox claude" id="box-claude-{{$i}}" data-model="claude" data-i="{{$i}}">
         <div class="box-header">
           <span class="model-tag">claude</span>
@@ -412,6 +401,17 @@ const repoPageTpl = `<!doctype html>
         </div>
         <pre id="prev-claude-{{$i}}" class="preview">thinking</pre>
         <pre id="out-claude-{{$i}}" class="llm-out" hidden>{{ $e.OutputClaude }}</pre>
+      </div>
+      <div class="outbox gemini" id="box-gemini-{{$i}}" data-model="gemini" data-i="{{$i}}">
+        <div class="box-header">
+          <span class="model-tag">gemini</span>
+          <span id="status-gemini-{{$i}}" class="status-badge {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}">
+            {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}
+          </span>
+          <button type="button" class="toggle" data-i="{{$i}}" data-model="gemini">Expand</button>
+        </div>
+        <pre id="prev-gemini-{{$i}}" class="preview">thinking</pre>
+        <pre id="out-gemini-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
       </div>
     {{end}}
     {{if .HasPending}}
@@ -442,7 +442,7 @@ const repoPageTpl = `<!doctype html>
           var remaining = models.length;
 
           function scrollTarget() {
-            return document.getElementById('out-gemini-{{.PendingIdx}}') || document.getElementById('out-claude-{{.PendingIdx}}');
+            return document.getElementById('out-claude-{{.PendingIdx}}') || document.getElementById('out-gemini-{{.PendingIdx}}');
           }
 
           function startModel(model){
