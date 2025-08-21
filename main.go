@@ -94,6 +94,152 @@ func initDB() error {
 	return nil
 }
 
+func currentBranchAndCommit(ctx context.Context, dir string) (string, string, error) {
+	bc := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	bc.Dir = dir
+	bOut, err := bc.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("get branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(bOut))
+	cc := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
+	cc.Dir = dir
+	cOut, err := cc.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("get commit: %w", err)
+	}
+	sha := strings.TrimSpace(string(cOut))
+	return branch, sha, nil
+}
+
+func genNotebookID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+func createNotebook(ctx context.Context, org, repo string) (string, error) {
+	dir := repoDirPath(org, repo)
+	branch, sha, err := currentBranchAndCommit(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	id := genNotebookID()
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO notebooks(id, org, repo, branch, commit_sha)
+		VALUES(?, ?, ?, ?, ?)
+	`, id, org, repo, branch, sha)
+	if err != nil {
+		return "", fmt.Errorf("insert notebook: %w", err)
+	}
+	return id, nil
+}
+
+type nbListItem struct {
+	ID          string
+	Org         string
+	Repo        string
+	Branch      string
+	CommitShort string
+	CreatedAt   string
+}
+
+func listNotebooks(ctx context.Context) ([]nbListItem, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, org, repo, branch, commit_sha, created_at
+		FROM notebooks
+		ORDER BY created_at DESC
+		LIMIT 100
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []nbListItem
+	for rows.Next() {
+		var it nbListItem
+		var sha string
+		if err := rows.Scan(&it.ID, &it.Org, &it.Repo, &it.Branch, &sha, &it.CreatedAt); err != nil {
+			return nil, err
+		}
+		if len(sha) >= 7 {
+			it.CommitShort = sha[:7]
+		} else {
+			it.CommitShort = sha
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+type notebookMeta struct {
+	ID     string
+	Org    string
+	Repo   string
+	Branch string
+	SHA    string
+}
+
+func loadNotebook(ctx context.Context, id string) (notebookMeta, []entry, error) {
+	var m notebookMeta
+	err := db.QueryRowContext(ctx, `
+		SELECT id, org, repo, branch, commit_sha
+		FROM notebooks WHERE id = ?
+	`, id).Scan(&m.ID, &m.Org, &m.Repo, &m.Branch, &m.SHA)
+	if err != nil {
+		return m, nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT idx, prompt, output
+		FROM notebook_entries
+		WHERE notebook_id = ?
+		ORDER BY idx ASC
+	`, id)
+	if err != nil {
+		return m, nil, err
+	}
+	defer rows.Close()
+	var es []entry
+	for rows.Next() {
+		var idx int
+		var e entry
+		if err := rows.Scan(&idx, &e.Prompt, &e.Output); err != nil {
+			return m, nil, err
+		}
+		es = append(es, e)
+	}
+	return m, es, rows.Err()
+}
+
+func appendNotebookEntry(ctx context.Context, nbID, prompt string) (int, error) {
+	var next int
+	err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(idx), -1) + 1 FROM notebook_entries WHERE notebook_id = ?
+	`, nbID).Scan(&next)
+	if err != nil {
+		return -1, err
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO notebook_entries(notebook_id, idx, prompt)
+		VALUES(?, ?, ?)
+	`, nbID, next, prompt)
+	if err != nil {
+		return -1, err
+	}
+	return next, nil
+}
+
+func setNotebookEntryOutput(ctx context.Context, nbID string, idx int, out string) error {
+	_, err := db.ExecContext(ctx, `
+		UPDATE notebook_entries
+		SET output = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+		WHERE notebook_id = ? AND idx = ?
+	`, out, nbID, idx)
+	return err
+}
+
 func recordClone(ctx context.Context, org, repo string) error {
 	dir := repoDirPath(org, repo)
 	branch, sha, err := currentBranchAndCommit(ctx, dir)
