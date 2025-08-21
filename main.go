@@ -100,6 +100,7 @@ func initDB() error {
 		return fmt.Errorf("schema: %w", err)
 	}
 	_, _ = db.Exec(`ALTER TABLE notebook_entries ADD COLUMN output_claude TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE notebook_entries ADD COLUMN intent TEXT NOT NULL DEFAULT ''`)
 	return nil
 }
 
@@ -217,7 +218,7 @@ func loadNotebook(ctx context.Context, id string) (notebookMeta, []entry, error)
 		return m, nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT idx, prompt, output, output_claude
+		SELECT idx, prompt, output, output_claude, intent
 		FROM notebook_entries
 		WHERE notebook_id = ?
 		ORDER BY idx ASC
@@ -230,7 +231,7 @@ func loadNotebook(ctx context.Context, id string) (notebookMeta, []entry, error)
 	for rows.Next() {
 		var idx int
 		var e entry
-		if err := rows.Scan(&idx, &e.Prompt, &e.Output, &e.OutputClaude); err != nil {
+		if err := rows.Scan(&idx, &e.Prompt, &e.Output, &e.OutputClaude, &e.Intent); err != nil {
 			return m, nil, err
 		}
 		es = append(es, e)
@@ -275,6 +276,19 @@ func setNotebookEntryOutputForModel(ctx context.Context, nbID string, idx int, m
 		SET `+col+` = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 		WHERE notebook_id = ? AND idx = ?
 	`, out, nbID, idx)
+	return err
+}
+
+func setNotebookEntryIntent(ctx context.Context, nbID string, idx int, intent string) error {
+	intent = strings.ToLower(strings.TrimSpace(intent))
+	if intent != "edit" && intent != "question" {
+		intent = ""
+	}
+	_, err := db.ExecContext(ctx, `
+		UPDATE notebook_entries
+		SET intent = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+		WHERE notebook_id = ? AND idx = ?
+	`, intent, nbID, idx)
 	return err
 }
 
@@ -381,6 +395,7 @@ const repoPageTpl = `<!doctype html>
     .outbox.gemini { border-color: #dbeafe; }
     .outbox.claude { border-color: #f3e8ff; }
     .model-tag { font-size:0.85rem; color:#6b7280; margin-right:8px; text-transform: uppercase; letter-spacing:.02em; }
+    .outbox.aider { border-color: #fee2e2; }
   </style>
 </head>
 <body>
@@ -391,28 +406,71 @@ const repoPageTpl = `<!doctype html>
       <section class="prompt-view">
         <textarea class="prompt-input" readonly rows="2">{{ $e.Prompt }}</textarea>
       </section>
-      <div class="outbox claude" id="box-claude-{{$i}}" data-model="claude" data-i="{{$i}}">
-        <div class="box-header">
-          <span class="model-tag">claude</span>
-          <span id="status-claude-{{$i}}" class="status-badge {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.OutputClaude}}done{{else}}thinking{{end}}">
-            {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.OutputClaude}}done{{else}}thinking{{end}}
-          </span>
-          <button type="button" class="toggle" data-i="{{$i}}" data-model="claude">Expand</button>
-        </div>
-        <pre id="prev-claude-{{$i}}" class="preview">thinking</pre>
-        <pre id="out-claude-{{$i}}" class="llm-out" hidden>{{ $e.OutputClaude }}</pre>
+  {{if and $.HasPending (eq $i $.PendingIdx)}}
+    <!-- Pending entry: initially hide all model boxes; router will decide -->
+    <div class="outbox aider" id="box-aider-{{$i}}" data-model="aider" data-i="{{$i}}" style="display:none">
+      <div class="box-header">
+        <span class="model-tag">aider</span>
+        <span id="status-aider-{{$i}}" class="status-badge">todo</span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="aider">Expand</button>
       </div>
-      <div class="outbox gemini" id="box-gemini-{{$i}}" data-model="gemini" data-i="{{$i}}">
-        <div class="box-header">
-          <span class="model-tag">gemini</span>
-          <span id="status-gemini-{{$i}}" class="status-badge {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}">
-            {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}
-          </span>
-          <button type="button" class="toggle" data-i="{{$i}}" data-model="gemini">Expand</button>
-        </div>
-        <pre id="prev-gemini-{{$i}}" class="preview">thinking</pre>
-        <pre id="out-gemini-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+      <pre id="prev-aider-{{$i}}" class="preview">not implemented yet</pre>
+      <pre id="out-aider-{{$i}}" class="llm-out" hidden>aider is not implemented yet</pre>
+    </div>
+    <div class="outbox claude" id="box-claude-{{$i}}" data-model="claude" data-i="{{$i}}" style="display:none">
+      <div class="box-header">
+        <span class="model-tag">claude</span>
+        <span id="status-claude-{{$i}}" class="status-badge thinking">thinking</span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="claude">Expand</button>
       </div>
+      <pre id="prev-claude-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-claude-{{$i}}" class="llm-out" hidden>{{ $e.OutputClaude }}</pre>
+    </div>
+    <div class="outbox gemini" id="box-gemini-{{$i}}" data-model="gemini" data-i="{{$i}}" style="display:none">
+      <div class="box-header">
+        <span class="model-tag">gemini</span>
+        <span id="status-gemini-{{$i}}" class="status-badge thinking">thinking</span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="gemini">Expand</button>
+      </div>
+      <pre id="prev-gemini-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-gemini-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+    </div>
+  {{else if eq $e.Intent "edit"}}
+    <!-- Completed edit entries show the Aider placeholder -->
+    <div class="outbox aider" id="box-aider-{{$i}}" data-model="aider" data-i="{{$i}}">
+      <div class="box-header">
+        <span class="model-tag">aider</span>
+        <span id="status-aider-{{$i}}" class="status-badge">todo</span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="aider">Expand</button>
+      </div>
+      <pre id="prev-aider-{{$i}}" class="preview">not implemented yet</pre>
+      <pre id="out-aider-{{$i}}" class="llm-out" hidden>aider is not implemented yet</pre>
+    </div>
+  {{else}}
+    <!-- Completed question entries show both models -->
+    <div class="outbox claude" id="box-claude-{{$i}}" data-model="claude" data-i="{{$i}}">
+      <div class="box-header">
+        <span class="model-tag">claude</span>
+        <span id="status-claude-{{$i}}" class="status-badge {{if $e.OutputClaude}}done{{else}}thinking{{end}}">
+          {{if $e.OutputClaude}}done{{else}}thinking{{end}}
+        </span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="claude">Expand</button>
+      </div>
+      <pre id="prev-claude-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-claude-{{$i}}" class="llm-out" hidden>{{ $e.OutputClaude }}</pre>
+    </div>
+    <div class="outbox gemini" id="box-gemini-{{$i}}" data-model="gemini" data-i="{{$i}}">
+      <div class="box-header">
+        <span class="model-tag">gemini</span>
+        <span id="status-gemini-{{$i}}" class="status-badge {{if $e.Output}}done{{else}}thinking{{end}}">
+          {{if $e.Output}}done{{else}}thinking{{end}}
+        </span>
+        <button type="button" class="toggle" data-i="{{$i}}" data-model="gemini">Expand</button>
+      </div>
+      <pre id="prev-gemini-{{$i}}" class="preview">thinking</pre>
+      <pre id="out-gemini-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+    </div>
+  {{end}}
     {{end}}
     {{if .HasPending}}
       <div id="pending" class="actions">
@@ -436,13 +494,20 @@ const repoPageTpl = `<!doctype html>
           });
           if (!runForm) return;
 
-          var models = ['gemini','claude'];
           var controllers = {};
           var abortedAll = false;
-          var remaining = models.length;
+          var remaining = 0; // will set to 2 if we start both models
 
-          function scrollTarget() {
-            return document.getElementById('out-claude-{{.PendingIdx}}') || document.getElementById('out-gemini-{{.PendingIdx}}');
+          function showNextPromptAndRemovePending(){
+            if (pendingEl && pendingEl.remove) { pendingEl.remove(); }
+            else if (pendingEl) { pendingEl.style.display = 'none'; }
+            var next = document.getElementById('nextPrompt');
+            if (next) {
+              next.style.display = '';
+              var ta = next.querySelector('textarea');
+              if (ta) ta.focus();
+            }
+            if (stopBtn) stopBtn.disabled = true;
           }
 
           function startModel(model){
@@ -454,10 +519,7 @@ const repoPageTpl = `<!doctype html>
               var t = txt || '';
               prevEl.textContent = t ? t.slice(-80) : 'thinking';
             }
-            // Initialize preview
             updatePreview(outEl ? outEl.textContent : '');
-            var st = scrollTarget();
-            if (st && st.scrollIntoView) st.scrollIntoView({block:'end'});
 
             var controller = new AbortController();
             controllers[model] = controller;
@@ -488,7 +550,6 @@ const repoPageTpl = `<!doctype html>
               return read();
             })
             .catch(function(err){
-              // Mark this model as stopped (network/abort)
               if (boxStatusEl) { boxStatusEl.textContent = 'stopped'; boxStatusEl.className = 'status-badge'; }
               if (!abortedAll && outEl) {
                 outEl.textContent += '\n[stream error] ' + err + '\n';
@@ -501,15 +562,67 @@ const repoPageTpl = `<!doctype html>
               }
               remaining--;
               if (remaining === 0) {
-                if (pendingEl && pendingEl.remove) { pendingEl.remove(); }
-                else if (pendingEl) { pendingEl.style.display = 'none'; }
-                var next = document.getElementById('nextPrompt');
-                if (next) {
-                  next.style.display = '';
-                  var ta = next.querySelector('textarea');
-                  if (ta) ta.focus();
-                }
-                if (stopBtn) stopBtn.disabled = true;
+                showNextPromptAndRemovePending();
+              }
+            });
+          }
+
+          function startRouter(){
+            var controller = new AbortController();
+            controllers['router'] = controller;
+            runStatusEl.textContent = 'Thinking...';
+            var fd = new FormData(runForm);
+            fd.append('model', 'router');
+            var body = new URLSearchParams(fd);
+            var routerOut = '';
+            fetch('/run', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+              body: body.toString(),
+              signal: controller.signal
+            })
+            .then(function(res){
+              var reader = res.body.getReader();
+              var dec = new TextDecoder();
+              function read(){
+                return reader.read().then(function(result){
+                  if (result.done) return;
+                  routerOut += dec.decode(result.value, {stream:true});
+                  return read();
+                });
+              }
+              return read();
+            })
+            .catch(function(err){
+              if (!abortedAll) {
+                routerOut += '\n[router error] ' + err + '\n';
+              }
+            })
+            .finally(function(){
+              if (abortedAll) {
+                showNextPromptAndRemovePending();
+                return;
+              }
+              var s = (routerOut || '').toLowerCase();
+              var decision = 'question';
+              if (s.indexOf('edit') >= 0 && s.indexOf('question') < 0) decision = 'edit';
+              if (s.trim() === 'edit') decision = 'edit';
+              if (decision === 'edit') {
+                // Show Aider placeholder
+                var box = document.getElementById('box-aider-{{.PendingIdx}}');
+                if (box) box.style.display = '';
+                var st = document.getElementById('status-aider-{{.PendingIdx}}');
+                if (st) { st.textContent = 'todo'; st.className = 'status-badge'; }
+                showNextPromptAndRemovePending();
+              } else {
+                // Show model boxes and start both
+                var bc = document.getElementById('box-claude-{{.PendingIdx}}');
+                var bg = document.getElementById('box-gemini-{{.PendingIdx}}');
+                if (bc) bc.style.display = '';
+                if (bg) bg.style.display = '';
+                remaining = 2;
+                startModel('claude');
+                startModel('gemini');
               }
             });
           }
@@ -518,15 +631,19 @@ const repoPageTpl = `<!doctype html>
             abortedAll = true;
             stopBtn.disabled = true;
             runStatusEl.textContent = 'Stopping...';
-            models.forEach(function(m){
-              if (controllers[m]) controllers[m].abort();
-              var boxStatusEl = document.getElementById('status-' + m + '-{{.PendingIdx}}');
-              if (boxStatusEl) { boxStatusEl.textContent = 'stopped'; boxStatusEl.className = 'status-badge'; }
+            Object.keys(controllers).forEach(function(k){
+              try { controllers[k].abort(); } catch(e){}
             });
+            // Mark any visible boxes as stopped
+            ['claude','gemini','aider'].forEach(function(m){
+              var el = document.getElementById('status-' + m + '-{{.PendingIdx}}');
+              if (el) { el.textContent = 'stopped'; el.className = 'status-badge'; }
+            });
+            showNextPromptAndRemovePending();
           });
 
-          // Kick off both models
-          models.forEach(startModel);
+          // Kick off router first
+          startRouter();
         })();
       </script>
     {{end}}
@@ -754,6 +871,7 @@ type entry struct {
 	Prompt       string
 	Output       string
 	OutputClaude string
+	Intent       string
 }
 
 var (
@@ -1054,7 +1172,7 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = "gemini"
 	}
-	if model != "gemini" && model != "claude" {
+	if model != "gemini" && model != "claude" && model != "router" {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1094,9 +1212,12 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	var cmd *exec.Cmd
 	if model == "gemini" {
 		cmd = exec.CommandContext(ctx, "gemini", "--prompt", prompt)
-	} else { // claude
+	} else if model == "claude" {
 		cmd = exec.CommandContext(ctx, "claude", "--print")
 		cmd.Stdin = strings.NewReader(prompt)
+	} else { // router
+		questionPrompt := "Is the following prompt asking an informational question or requesting edits to the code? Please respond 'question' or 'edit' and nothing else: " + prompt
+		cmd = exec.CommandContext(ctx, "llm", "--model", "gpt-5-nano", questionPrompt)
 	}
 	cmd.Dir = worktreeDirPath(meta.Org, meta.Repo, meta.Worktree)
 	// Ensure API keys are available to the child process
@@ -1107,12 +1228,19 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 			cmd.Env = os.Environ()
 			log.Printf("runHandler: warning: GEMINI_API_KEY not set")
 		}
-	} else {
+	} else if model == "claude" {
 		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 			cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+key)
 		} else {
 			cmd.Env = os.Environ()
 			log.Printf("runHandler: warning: ANTHROPIC_API_KEY not set")
+		}
+	} else { // router
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "OPENAI_API_KEY="+key)
+		} else {
+			cmd.Env = os.Environ()
+			log.Printf("runHandler: warning: OPENAI_API_KEY not set")
 		}
 	}
 	var buf bytes.Buffer
@@ -1133,6 +1261,24 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
 		_, _ = w.Write([]byte("\n[" + model + " exited with error: " + err.Error() + "]\n"))
 		f.Flush()
+		return
+	}
+	if model == "router" {
+		// Parse decision and persist intent
+		s := strings.ToLower(strings.TrimSpace(buf.String()))
+		intent := ""
+		if s == "edit" || strings.HasPrefix(s, "edit") {
+			intent = "edit"
+		} else if s == "question" || strings.HasPrefix(s, "question") {
+			intent = "question"
+		}
+		if err := setNotebookEntryIntent(r.Context(), nbID, idx, intent); err != nil {
+			log.Printf("runHandler: set intent error: %v", err)
+		}
+		// No output column for router; still write trailing [done] for client
+		_, _ = w.Write([]byte("\n[done]\n"))
+		f.Flush()
+		log.Printf("runHandler: %s complete", model)
 		return
 	}
 	log.Printf("runHandler: %s complete", model)
