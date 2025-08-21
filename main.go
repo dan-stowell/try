@@ -99,6 +99,7 @@ func initDB() error {
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("schema: %w", err)
 	}
+	_, _ = db.Exec(`ALTER TABLE notebook_entries ADD COLUMN output_claude TEXT NOT NULL DEFAULT ''`)
 	return nil
 }
 
@@ -216,7 +217,7 @@ func loadNotebook(ctx context.Context, id string) (notebookMeta, []entry, error)
 		return m, nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT idx, prompt, output
+		SELECT idx, prompt, output, output_claude
 		FROM notebook_entries
 		WHERE notebook_id = ?
 		ORDER BY idx ASC
@@ -229,7 +230,7 @@ func loadNotebook(ctx context.Context, id string) (notebookMeta, []entry, error)
 	for rows.Next() {
 		var idx int
 		var e entry
-		if err := rows.Scan(&idx, &e.Prompt, &e.Output); err != nil {
+		if err := rows.Scan(&idx, &e.Prompt, &e.Output, &e.OutputClaude); err != nil {
 			return m, nil, err
 		}
 		es = append(es, e)
@@ -259,6 +260,19 @@ func setNotebookEntryOutput(ctx context.Context, nbID string, idx int, out strin
 	_, err := db.ExecContext(ctx, `
 		UPDATE notebook_entries
 		SET output = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+		WHERE notebook_id = ? AND idx = ?
+	`, out, nbID, idx)
+	return err
+}
+
+func setNotebookEntryOutputForModel(ctx context.Context, nbID string, idx int, model, out string) error {
+	col := "output"
+	if strings.ToLower(model) == "claude" {
+		col = "output_claude"
+	}
+	_, err := db.ExecContext(ctx, `
+		UPDATE notebook_entries
+		SET `+col+` = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
 		WHERE notebook_id = ? AND idx = ?
 	`, out, nbID, idx)
 	return err
@@ -364,6 +378,9 @@ const repoPageTpl = `<!doctype html>
     button { height:44px; padding:0 20px; font-size:1rem; border-radius:8px; cursor:pointer; }
     a.link { text-decoration: none; padding: 10px 12px; border-radius: 8px; }
     .msg { margin-top:8px; text-align:left; }
+    .outbox.gemini { border-color: #dbeafe; }
+    .outbox.claude { border-color: #f3e8ff; }
+    .model-tag { font-size:0.85rem; color:#6b7280; margin-right:8px; text-transform: uppercase; letter-spacing:.02em; }
   </style>
 </head>
 <body>
@@ -374,15 +391,27 @@ const repoPageTpl = `<!doctype html>
       <section class="prompt-view">
         <textarea class="prompt-input" readonly rows="2">{{ $e.Prompt }}</textarea>
       </section>
-      <div class="outbox" id="box-{{$i}}">
+      <div class="outbox gemini" id="box-gemini-{{$i}}" data-model="gemini" data-i="{{$i}}">
         <div class="box-header">
-          <span id="status-{{$i}}" class="status-badge {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}">
+          <span class="model-tag">gemini</span>
+          <span id="status-gemini-{{$i}}" class="status-badge {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}">
             {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}
           </span>
-          <button type="button" class="toggle" data-i="{{$i}}">Expand</button>
+          <button type="button" class="toggle" data-i="{{$i}}" data-model="gemini">Expand</button>
         </div>
-        <pre id="prev-{{$i}}" class="preview">thinking</pre>
-        <pre id="out-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+        <pre id="prev-gemini-{{$i}}" class="preview">thinking</pre>
+        <pre id="out-gemini-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+      </div>
+      <div class="outbox claude" id="box-claude-{{$i}}" data-model="claude" data-i="{{$i}}">
+        <div class="box-header">
+          <span class="model-tag">claude</span>
+          <span id="status-claude-{{$i}}" class="status-badge {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.OutputClaude}}done{{else}}thinking{{end}}">
+            {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.OutputClaude}}done{{else}}thinking{{end}}
+          </span>
+          <button type="button" class="toggle" data-i="{{$i}}" data-model="claude">Expand</button>
+        </div>
+        <pre id="prev-claude-{{$i}}" class="preview">thinking</pre>
+        <pre id="out-claude-{{$i}}" class="llm-out" hidden>{{ $e.OutputClaude }}</pre>
       </div>
     {{end}}
     {{if .HasPending}}
@@ -397,20 +426,7 @@ const repoPageTpl = `<!doctype html>
       <script>
         (function(){
           var runForm = document.getElementById('runForm');
-          var outEl = document.getElementById('out-{{.PendingIdx}}');
           var pendingEl = document.getElementById('pending');
-          var prevEl = document.getElementById('prev-{{.PendingIdx}}');
-          var boxStatusEl = document.getElementById('status-{{.PendingIdx}}');
-          function updatePreview(txt){
-            if (!prevEl) return;
-            var t = txt || '';
-            prevEl.textContent = t ? t.slice(-80) : 'thinking';
-          }
-          // initialize preview (for safety if any initial content exists)
-          updatePreview(outEl ? outEl.textContent : '');
-          if (outEl && outEl.scrollIntoView) {
-            outEl.scrollIntoView({block:'end'});
-          }
           var runStatusEl = document.getElementById('runStatus');
           var stopBtn = document.getElementById('stopBtn');
           var stickToBottom = true;
@@ -418,65 +434,99 @@ const repoPageTpl = `<!doctype html>
             var nearBottom = (window.scrollY + window.innerHeight) >= (document.documentElement.scrollHeight - 40);
             stickToBottom = nearBottom;
           });
-          if (!runForm || !outEl) return;
-          var controller = new AbortController();
-          var aborted = false;
-          stopBtn.addEventListener('click', function(){
-            stopBtn.disabled = true;
-            runStatusEl.textContent = 'Stopping...';
-            controller.abort();
-            aborted = true;
-            if (boxStatusEl) { boxStatusEl.textContent = 'stopped'; boxStatusEl.className = 'status-badge'; }
-          });
-          runStatusEl.textContent = 'Running...';
-          var fd = new FormData(runForm);
-          var body = new URLSearchParams(fd);
-          fetch('/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-            body: body.toString(),
-            signal: controller.signal
-          })
+          if (!runForm) return;
+
+          var models = ['gemini','claude'];
+          var controllers = {};
+          var abortedAll = false;
+          var remaining = models.length;
+
+          function scrollTarget() {
+            return document.getElementById('out-gemini-{{.PendingIdx}}') || document.getElementById('out-claude-{{.PendingIdx}}');
+          }
+
+          function startModel(model){
+            var outEl = document.getElementById('out-' + model + '-{{.PendingIdx}}');
+            var prevEl = document.getElementById('prev-' + model + '-{{.PendingIdx}}');
+            var boxStatusEl = document.getElementById('status-' + model + '-{{.PendingIdx}}');
+            function updatePreview(txt){
+              if (!prevEl) return;
+              var t = txt || '';
+              prevEl.textContent = t ? t.slice(-80) : 'thinking';
+            }
+            // Initialize preview
+            updatePreview(outEl ? outEl.textContent : '');
+            var st = scrollTarget();
+            if (st && st.scrollIntoView) st.scrollIntoView({block:'end'});
+
+            var controller = new AbortController();
+            controllers[model] = controller;
+
+            var fd = new FormData(runForm);
+            fd.append('model', model);
+            var body = new URLSearchParams(fd);
+            runStatusEl.textContent = 'Running...';
+            fetch('/run', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+              body: body.toString(),
+              signal: controller.signal
+            })
             .then(function(res){
               var reader = res.body.getReader();
               var dec = new TextDecoder();
-              function read() {
+              function read(){
                 return reader.read().then(function(result){
                   if (result.done) return;
                   outEl.textContent += dec.decode(result.value, {stream:true});
                   updatePreview(outEl.textContent);
                   outEl.scrollTop = outEl.scrollHeight;
-                  if (stickToBottom && outEl.scrollIntoView) {
-                    outEl.scrollIntoView({block:'end'});
-                  }
+                  if (stickToBottom && outEl.scrollIntoView) outEl.scrollIntoView({block:'end'});
                   return read();
                 });
               }
               return read();
             })
             .catch(function(err){
-              aborted = true;
+              // Mark this model as stopped (network/abort)
               if (boxStatusEl) { boxStatusEl.textContent = 'stopped'; boxStatusEl.className = 'status-badge'; }
-              outEl.textContent += '\n[stream error] ' + err + '\n';
+              if (!abortedAll && outEl) {
+                outEl.textContent += '\n[stream error] ' + err + '\n';
+              }
             })
             .finally(function(){
-              if (pendingEl && pendingEl.remove) {
-                pendingEl.remove();
-              } else if (pendingEl) {
-                pendingEl.style.display = 'none';
-              }
-              if (boxStatusEl && !aborted) {
+              if (boxStatusEl && !abortedAll) {
                 boxStatusEl.textContent = 'done';
                 boxStatusEl.className = 'status-badge done';
               }
-              var next = document.getElementById('nextPrompt');
-              if (next) {
-                next.style.display = '';
-                var ta = next.querySelector('textarea');
-                if (ta) ta.focus();
+              remaining--;
+              if (remaining === 0) {
+                if (pendingEl && pendingEl.remove) { pendingEl.remove(); }
+                else if (pendingEl) { pendingEl.style.display = 'none'; }
+                var next = document.getElementById('nextPrompt');
+                if (next) {
+                  next.style.display = '';
+                  var ta = next.querySelector('textarea');
+                  if (ta) ta.focus();
+                }
+                if (stopBtn) stopBtn.disabled = true;
               }
-              stopBtn.disabled = true;
             });
+          }
+
+          stopBtn.addEventListener('click', function(){
+            abortedAll = true;
+            stopBtn.disabled = true;
+            runStatusEl.textContent = 'Stopping...';
+            models.forEach(function(m){
+              if (controllers[m]) controllers[m].abort();
+              var boxStatusEl = document.getElementById('status-' + m + '-{{.PendingIdx}}');
+              if (boxStatusEl) { boxStatusEl.textContent = 'stopped'; boxStatusEl.className = 'status-badge'; }
+            });
+          });
+
+          // Kick off both models
+          models.forEach(startModel);
         })();
       </script>
     {{end}}
@@ -508,22 +558,24 @@ const repoPageTpl = `<!doctype html>
     </script>
     <script>
       (function(){
-        function updatePreviewFor(i){
-          var out = document.getElementById('out-' + i);
-          var prev = document.getElementById('prev-' + i);
+        function updatePreviewFor(model, i){
+          var out = document.getElementById('out-' + model + '-' + i);
+          var prev = document.getElementById('prev-' + model + '-' + i);
           if (!out || !prev) return;
           var txt = out.textContent || '';
           prev.textContent = txt ? txt.slice(-80) : 'thinking';
         }
         document.querySelectorAll('.outbox').forEach(function(box){
-          var i = (box.id || '').replace('box-','');
-          if (i !== '') updatePreviewFor(i);
+          var i = box.getAttribute('data-i');
+          var model = box.getAttribute('data-model');
+          if (i && model) updatePreviewFor(model, i);
         });
         document.querySelectorAll('.outbox .toggle').forEach(function(btn){
           btn.addEventListener('click', function(){
             var i = btn.getAttribute('data-i');
-            var out = document.getElementById('out-' + i);
-            var prev = document.getElementById('prev-' + i);
+            var model = btn.getAttribute('data-model');
+            var out = document.getElementById('out-' + model + '-' + i);
+            var prev = document.getElementById('prev-' + model + '-' + i);
             if (!out || !prev) return;
             var hidden = out.hasAttribute('hidden');
             if (hidden) {
@@ -534,7 +586,7 @@ const repoPageTpl = `<!doctype html>
               out.setAttribute('hidden', 'hidden');
               prev.style.display = '';
               btn.textContent = 'Expand';
-              updatePreviewFor(i);
+              updatePreviewFor(model, i);
             }
           });
         });
@@ -703,8 +755,9 @@ func isLikelyGitHubURL(s string) bool {
 // In-memory notebook
 
 type entry struct {
-	Prompt string
-	Output string
+	Prompt       string
+	Output       string
+	OutputClaude string
 }
 
 var (
@@ -1012,6 +1065,14 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	model := strings.TrimSpace(r.FormValue("model"))
+	if model == "" {
+		model = "gemini"
+	}
+	if model != "gemini" && model != "claude" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	// Load notebook meta
 	meta, _, err := loadNotebook(r.Context(), nbID)
 	if err != nil {
@@ -1041,19 +1102,33 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inform client immediately
-	_, _ = w.Write([]byte("Starting gemini...\n\n"))
+	_, _ = w.Write([]byte("Starting " + model + "...\n\n"))
 	f.Flush()
 
 	ctx := r.Context() // canceled when client aborts (Stop button)
-	cmd := exec.CommandContext(ctx, "gemini", "--prompt", prompt)
+	var cmd *exec.Cmd
+	if model == "gemini" {
+		cmd = exec.CommandContext(ctx, "gemini", "--prompt", prompt)
+	} else { // claude
+		cmd = exec.CommandContext(ctx, "claude", "--print")
+		cmd.Stdin = strings.NewReader(prompt)
+	}
 	cmd.Dir = worktreeDirPath(meta.Org, meta.Repo, meta.Worktree)
-	// Ensure GEMINI_API_KEY is available to the child process
-	if key := os.Getenv("GEMINI_API_KEY"); key != "" {
-		cmd.Env = append(os.Environ(), "GEMINI_API_KEY="+key)
+	// Ensure API keys are available to the child process
+	if model == "gemini" {
+		if key := os.Getenv("GEMINI_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "GEMINI_API_KEY="+key)
+		} else {
+			cmd.Env = os.Environ()
+			log.Printf("runHandler: warning: GEMINI_API_KEY not set")
+		}
 	} else {
-		// Keep existing environment; warn if the key is missing
-		cmd.Env = os.Environ()
-		log.Printf("runHandler: warning: GEMINI_API_KEY not set")
+		if key := os.Getenv("CLAUDE_API_KEY"); key != "" {
+			cmd.Env = append(os.Environ(), "CLAUDE_API_KEY="+key)
+		} else {
+			cmd.Env = os.Environ()
+			log.Printf("runHandler: warning: CLAUDE_API_KEY not set")
+		}
 	}
 	var buf bytes.Buffer
 	fw := flushWriter{w: w, f: f}
@@ -1061,7 +1136,7 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	cmd.Stdout = mw
 	cmd.Stderr = mw
 
-	log.Printf("runHandler: running `gemini --prompt` in %s", cmd.Dir)
+	log.Printf("runHandler: running model=%s in %s", model, cmd.Dir)
 	if err := cmd.Start(); err != nil {
 		log.Printf("runHandler: start error: %v", err)
 		_, _ = w.Write([]byte("error: failed to start gemini: " + err.Error() + "\n"))
@@ -1070,13 +1145,13 @@ func runHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := cmd.Wait(); err != nil {
 		log.Printf("runHandler: gemini exited with error: %v", err)
-		_ = setNotebookEntryOutput(r.Context(), nbID, idx, buf.String())
+		_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
 		_, _ = w.Write([]byte("\n[gemini exited with error: " + err.Error() + "]\n"))
 		f.Flush()
 		return
 	}
 	log.Printf("runHandler: gemini complete")
-	_ = setNotebookEntryOutput(r.Context(), nbID, idx, buf.String())
+	_ = setNotebookEntryOutputForModel(r.Context(), nbID, idx, model, buf.String())
 	_, _ = w.Write([]byte("\n[done]\n"))
 	f.Flush()
 }
