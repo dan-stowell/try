@@ -23,7 +23,20 @@ import (
 	"time"
 )
 
-var cloneDir = flag.String("clone-dir", "/tmp/clone", "directory to store clones")
+ // Base app directory; clones live under <dir>/clone.
+func defaultAppDir() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return filepath.Join(h, ".trybook")
+	}
+	// Fallback if home not found
+	return ".trybook"
+}
+
+var appDir = flag.String("dir", defaultAppDir(), "base directory for Trybook data")
+
+func cloneBaseDir() string {
+	return filepath.Join(*appDir, "clone")
+}
 
 const pageTpl = `<!doctype html>
 <html lang="en">
@@ -289,7 +302,7 @@ func parseRepoInput(s string) (string, string, error) {
 }
 
 func repoDirPath(org, repo string) string {
-	return filepath.Join(*cloneDir, org, repo)
+	return filepath.Join(cloneBaseDir(), org, repo)
 }
 
 func pathExists(p string) bool {
@@ -463,7 +476,7 @@ func tryHandler(w http.ResponseWriter, r *http.Request) {
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: err.Error(), MsgClass: "error"})
 		return
 	}
-	if err := os.MkdirAll(*cloneDir, 0o755); err != nil {
+	if err := os.MkdirAll(cloneBaseDir(), 0o755); err != nil {
 		log.Printf("tryHandler: MkdirAll(%q) error: %v", *cloneDir, err)
 		setHTMLHeaders(w)
 		_ = tpl.Execute(w, viewModel{Title: "Trybook", Message: "Server cannot create clone dir.", MsgClass: "error"})
