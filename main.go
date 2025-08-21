@@ -135,12 +135,18 @@ const repoPageTpl = `<!doctype html>
             })
             .finally(function(){
               statusEl.textContent = 'Done';
+              var next = document.getElementById('nextPrompt');
+              if (next) {
+                next.style.display = '';
+                var ta = next.querySelector('textarea');
+                if (ta) ta.focus();
+              }
               stopBtn.disabled = true;
             });
         })();
       </script>
     {{end}}
-    <form method="post" action="/prompt" novalidate>
+    <form id="nextPrompt" method="post" action="/prompt" novalidate{{if .HasPending}} style="display:none"{{end}}>
       <input type="hidden" name="org" value="{{.Org}}">
       <input type="hidden" name="repo" value="{{.Repo}}">
       <textarea name="prompt" class="prompt-input" placeholder="Enter a prompt..." rows="2"></textarea>
