@@ -852,7 +852,12 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	meta, _ := loadNotebook(r.Context(), nbID)
+	meta, _, err := loadNotebook(r.Context(), nbID)
+	if err != nil {
+		log.Printf("promptHandler: loadNotebook error: %v", err)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	vm := viewModel{
 		Title:       "Trybook - " + meta.Org + "/" + meta.Repo,
 		Org:         meta.Org,
