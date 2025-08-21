@@ -157,6 +157,17 @@ func setHTMLHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'")
 }
 
+type flushWriter struct {
+	w http.ResponseWriter
+	f http.Flusher
+}
+
+func (fw flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	fw.f.Flush()
+	return n, err
+}
+
 func isSafeToken(s string) bool {
 	if s == "" {
 		return false
