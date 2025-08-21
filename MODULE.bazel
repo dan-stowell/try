@@ -1,0 +1,6 @@
+module(name = "try")
+
+bazel_dep(name = "rules_go", version = "0.56.1")
+
+go = use_extension("@rules_go//go:extensions.bzl", "go")
+go.toolchain(version = "1.25.0")

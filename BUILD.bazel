@@ -1,0 +1,11 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "try_lib",
+    srcs = ["try.go"],
+)
+
+go_binary(
+    name = "try",
+    embed = [":try_lib"],
+)

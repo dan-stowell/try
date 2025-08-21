@@ -1,0 +1,5 @@
+.bazelrc
+output_base
+disk_cache
+repository_cache
+bazel-*
