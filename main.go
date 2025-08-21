@@ -100,7 +100,7 @@ const repoPageTpl = `<!doctype html>
       <pre id="out-{{$i}}" class="llm-out">{{ $e.Output }}</pre>
     {{end}}
     {{if .HasPending}}
-      <div class="actions">
+      <div id="pending" class="actions">
         <button id="stopBtn" type="button">Stop</button>
         <span id="status">Running...</span>
       </div>
@@ -111,6 +111,10 @@ const repoPageTpl = `<!doctype html>
       </form>
       <script>
         (function(){
+          var pendingEl = document.getElementById('pending');
+          if (pendingEl && pendingEl.scrollIntoView) {
+            pendingEl.scrollIntoView({block:'start'});
+          }
           var runForm = document.getElementById('runForm');
           var outEl = document.getElementById('out-{{.PendingIdx}}');
           var statusEl = document.getElementById('status');
@@ -173,6 +177,10 @@ const repoPageTpl = `<!doctype html>
       (function(){
         var form = document.getElementById('nextPrompt');
         if (!form) return;
+        form.addEventListener('submit', function(){
+          // Ensure the next navigation lands at the pending section
+          form.action = (form.action.split('#')[0] || '/prompt') + '#pending';
+        });
         var ta = form.querySelector('textarea[name="prompt"]');
         if (!ta) return;
         ta.addEventListener('keydown', function(e){
