@@ -353,6 +353,13 @@ const repoPageTpl = `<!doctype html>
     form { display:flex; flex-direction:column; gap:12px; }
     .prompt-input { width:100%; font-size:1rem; padding:12px 14px; border-radius:8px; resize: vertical; }
     .llm-out { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; padding:12px 14px; border-radius:8px; overflow:auto; }
+    .outbox { border: 1px solid #e5e7eb; background: #f9fafb; border-radius:8px; padding:10px 12px; margin:8px 0 16px; }
+    .box-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+    .status-badge { font-size:0.9rem; color:#6b7280; }
+    .status-badge.done { color:#16a34a; }
+    .status-badge.thinking { color:#6b7280; }
+    .toggle { height:28px; padding: 0 10px; font-size: 0.9rem; }
+    .preview { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; color:#374151; }
     .actions { display:flex; gap:12px; align-items:center; }
     button { height:44px; padding:0 20px; font-size:1rem; border-radius:8px; cursor:pointer; }
     a.link { text-decoration: none; padding: 10px 12px; border-radius: 8px; }
@@ -367,12 +374,21 @@ const repoPageTpl = `<!doctype html>
       <section class="prompt-view">
         <textarea class="prompt-input" readonly rows="2">{{ $e.Prompt }}</textarea>
       </section>
-      <pre id="out-{{$i}}" class="llm-out">{{ $e.Output }}</pre>
+      <div class="outbox" id="box-{{$i}}">
+        <div class="box-header">
+          <span id="status-{{$i}}" class="status-badge {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}">
+            {{if and $.HasPending (eq $i $.PendingIdx)}}thinking{{else if $e.Output}}done{{else}}thinking{{end}}
+          </span>
+          <button type="button" class="toggle" data-i="{{$i}}">Expand</button>
+        </div>
+        <pre id="prev-{{$i}}" class="preview">thinking</pre>
+        <pre id="out-{{$i}}" class="llm-out" hidden>{{ $e.Output }}</pre>
+      </div>
     {{end}}
     {{if .HasPending}}
       <div id="pending" class="actions">
         <button id="stopBtn" type="button">Stop</button>
-        <span id="status">Running...</span>
+        <span id="runStatus">Running...</span>
       </div>
       <form id="runForm" method="post" action="/run" style="display:none">
         <input type="hidden" name="nb" value="{{.NotebookID}}">
@@ -383,10 +399,19 @@ const repoPageTpl = `<!doctype html>
           var runForm = document.getElementById('runForm');
           var outEl = document.getElementById('out-{{.PendingIdx}}');
           var pendingEl = document.getElementById('pending');
+          var prevEl = document.getElementById('prev-{{.PendingIdx}}');
+          var boxStatusEl = document.getElementById('status-{{.PendingIdx}}');
+          function updatePreview(txt){
+            if (!prevEl) return;
+            var t = txt || '';
+            prevEl.textContent = t ? t.slice(-80) : 'thinking';
+          }
+          // initialize preview (for safety if any initial content exists)
+          updatePreview(outEl ? outEl.textContent : '');
           if (outEl && outEl.scrollIntoView) {
             outEl.scrollIntoView({block:'end'});
           }
-          var statusEl = document.getElementById('status');
+          var runStatusEl = document.getElementById('runStatus');
           var stopBtn = document.getElementById('stopBtn');
           var stickToBottom = true;
           window.addEventListener('scroll', function(){
@@ -395,12 +420,15 @@ const repoPageTpl = `<!doctype html>
           });
           if (!runForm || !outEl) return;
           var controller = new AbortController();
+          var aborted = false;
           stopBtn.addEventListener('click', function(){
             stopBtn.disabled = true;
-            statusEl.textContent = 'Stopping...';
+            runStatusEl.textContent = 'Stopping...';
             controller.abort();
+            aborted = true;
+            if (boxStatusEl) { boxStatusEl.textContent = 'stopped'; boxStatusEl.className = 'status-badge'; }
           });
-          statusEl.textContent = 'Running...';
+          runStatusEl.textContent = 'Running...';
           var fd = new FormData(runForm);
           var body = new URLSearchParams(fd);
           fetch('/run', {
@@ -416,6 +444,7 @@ const repoPageTpl = `<!doctype html>
                 return reader.read().then(function(result){
                   if (result.done) return;
                   outEl.textContent += dec.decode(result.value, {stream:true});
+                  updatePreview(outEl.textContent);
                   outEl.scrollTop = outEl.scrollHeight;
                   if (stickToBottom && outEl.scrollIntoView) {
                     outEl.scrollIntoView({block:'end'});
@@ -426,10 +455,16 @@ const repoPageTpl = `<!doctype html>
               return read();
             })
             .catch(function(err){
+              aborted = true;
+              if (boxStatusEl) { boxStatusEl.textContent = 'stopped'; boxStatusEl.className = 'status-badge'; }
               outEl.textContent += '\n[stream error] ' + err + '\n';
             })
             .finally(function(){
-              statusEl.textContent = 'Done';
+              runStatusEl.textContent = 'Done';
+              if (boxStatusEl && !aborted) {
+                boxStatusEl.textContent = 'done';
+                boxStatusEl.className = 'status-badge done';
+              }
               var next = document.getElementById('nextPrompt');
               if (next) {
                 next.style.display = '';
@@ -464,6 +499,40 @@ const repoPageTpl = `<!doctype html>
             e.preventDefault();
             if (form.requestSubmit) form.requestSubmit(); else form.submit();
           }
+        });
+      })();
+    </script>
+    <script>
+      (function(){
+        function updatePreviewFor(i){
+          var out = document.getElementById('out-' + i);
+          var prev = document.getElementById('prev-' + i);
+          if (!out || !prev) return;
+          var txt = out.textContent || '';
+          prev.textContent = txt ? txt.slice(-80) : 'thinking';
+        }
+        document.querySelectorAll('.outbox').forEach(function(box){
+          var i = (box.id || '').replace('box-','');
+          if (i !== '') updatePreviewFor(i);
+        });
+        document.querySelectorAll('.outbox .toggle').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            var i = btn.getAttribute('data-i');
+            var out = document.getElementById('out-' + i);
+            var prev = document.getElementById('prev-' + i);
+            if (!out || !prev) return;
+            var hidden = out.hasAttribute('hidden');
+            if (hidden) {
+              out.removeAttribute('hidden');
+              prev.style.display = 'none';
+              btn.textContent = 'Collapse';
+            } else {
+              out.setAttribute('hidden', 'hidden');
+              prev.style.display = '';
+              btn.textContent = 'Expand';
+              updatePreviewFor(i);
+            }
+          });
         });
       })();
     </script>
