@@ -640,6 +640,23 @@ const repoPageTpl = `<!doctype html>
                 })
                 .catch(function(){ /* ignore */ });
               }
+              if (!abortedAll && model === 'gemini') {
+                var rawTxt = outEl ? outEl.textContent : '';
+                var body = 'nb={{.NotebookID}}&idx={{.PendingIdx}}&text=' + encodeURIComponent(rawTxt);
+                fetch('/api/clean_gemini', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                  body: body
+                })
+                .then(function(res){ return res.text(); })
+                .then(function(cleaned){
+                  if (outEl && cleaned) {
+                    outEl.textContent = cleaned;
+                    // Keep the bold summary in prevEl as-is; do not overwrite it
+                  }
+                })
+                .catch(function(){ /* ignore */ });
+              }
               remaining--;
               if (remaining === 0) {
                 showNextPromptAndRemovePending();
@@ -1507,7 +1524,7 @@ func summarizeFinalHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(strings.TrimSpace(string(out))))
 }
 
-// POST /api/summarize
+ // POST /api/summarize
 func summarizeHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1542,6 +1559,70 @@ func summarizeHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(strings.TrimSpace(string(out))))
 }
 
+// POST /api/clean_gemini
+func cleanGeminiHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	nbID := strings.TrimSpace(r.FormValue("nb"))
+	idxStr := strings.TrimSpace(r.FormValue("idx"))
+	txt := strings.TrimSpace(r.FormValue("text"))
+
+	// Cap input size to protect the summarizer
+	if len(txt) > 20000 {
+		txt = txt[len(txt)-20000:]
+	}
+
+	prompt := strings.Join([]string{
+		"You are given the raw output from a Gemini run. Produce a cleaned version:",
+		"- Remove any 'thinking' or internal reasoning sections.",
+		"- Remove tool-use logs and tool invocation/error messages.",
+		"- Remove the data-collection disclaimer/warning at the top if present.",
+		"- Remove any trailing status markers like [done] at the end.",
+		"- Otherwise keep the content and formatting exactly as-is.",
+		"Return only the cleaned text.",
+		"",
+		"Raw output:",
+		txt,
+	}, "\n")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "llm", "--model", "gpt-5-nano", prompt)
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		cmd.Env = append(os.Environ(), "OPENAI_API_KEY="+key)
+	} else {
+		cmd.Env = os.Environ()
+		log.Printf("cleanGeminiHandler: warning: OPENAI_API_KEY not set")
+	}
+	out, err := cmd.Output()
+	cleaned := strings.TrimSpace(string(out))
+	if cleaned == "" || err != nil {
+		if err != nil {
+			log.Printf("cleanGeminiHandler: llm error: %v", err)
+		}
+		// Fall back to returning original text if cleaning failed
+		cleaned = strings.TrimSpace(txt)
+	}
+
+	// Optionally persist if nb/idx provided and valid
+	if nbID != "" && isSafeToken(nbID) && idxStr != "" {
+		if idx, err := strconv.Atoi(idxStr); err == nil {
+			if err := setNotebookEntryOutputForModel(r.Context(), nbID, idx, "gemini", cleaned); err != nil {
+				log.Printf("cleanGeminiHandler: persist error: %v", err)
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(cleaned))
+}
+
 func newMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", indexHandler)
@@ -1553,6 +1634,7 @@ func newMux() http.Handler {
 	mux.HandleFunc("/api/head", nbHeadHandler)
 	mux.HandleFunc("/api/summarize", summarizeHandler)
 	mux.HandleFunc("/api/summarize_final", summarizeFinalHandler)
+	mux.HandleFunc("/api/clean_gemini", cleanGeminiHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	return mux
 }
