@@ -499,6 +499,40 @@ const repoPageTpl = `<!doctype html>
           if (!runForm) return;
 
           var controllers = {};
+          var summarizers = {}; // model-i -> summarizer
+          // Summarizer: calls server every 500ms with current output; updates preview unless frozen
+          function createSummarizer(model, i){
+            var prevEl = document.getElementById('prev-' + model + '-' + i);
+            var outEl = document.getElementById('out-' + model + '-' + i);
+            var timer = null, lastLen = -1, inFlight = false, frozen = false;
+            function tick(){
+              if (frozen || !outEl || !prevEl) return;
+              if (!controllers[model]) return; // not running
+              var txt = outEl.textContent || '';
+              if (txt.length === lastLen) return;
+              lastLen = txt.length;
+              if (inFlight) return;
+              inFlight = true;
+              var body = 'text=' + encodeURIComponent(txt.slice(-8000));
+              fetch('/api/summarize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+                body: body
+              })
+              .then(function(res){ return res.text(); })
+              .then(function(s){
+                if (!frozen && prevEl) prevEl.textContent = (s || '').trim() || 'thinking';
+              })
+              .catch(function(){ /* ignore */ })
+              .finally(function(){ inFlight = false; });
+            }
+            return {
+              start: function(){ if (!timer) { frozen = false; timer = setInterval(tick, 500); } },
+              stop: function(){ if (timer) { clearInterval(timer); timer = null; } },
+              freeze: function(){ frozen = true; },
+              resume: function(){ frozen = false; }
+            };
+          }
           var abortedAll = false;
           var remaining = 0; // will set to 2 if we start both models
 
@@ -534,12 +568,11 @@ const repoPageTpl = `<!doctype html>
               boxStatusEl.textContent = 'waiting...';
               boxStatusEl.className = 'status-badge waiting';
             }
-            function updatePreview(txt){
-              if (!prevEl) return;
-              var t = txt || '';
-              prevEl.textContent = t ? t.slice(-80) : 'thinking';
-            }
-            updatePreview(outEl ? outEl.textContent : '');
+            if (prevEl) prevEl.textContent = 'thinking';
+            var sumKey = model + '-{{.PendingIdx}}';
+            var summarizer = createSummarizer(model, '{{.PendingIdx}}');
+            summarizers[sumKey] = summarizer;
+            summarizer.start();
 
             var controller = new AbortController();
             controllers[model] = controller;
@@ -568,7 +601,6 @@ const repoPageTpl = `<!doctype html>
                       boxStatusEl.className = 'status-badge';
                     }
                   }
-                  updatePreview(outEl.textContent);
                   outEl.scrollTop = outEl.scrollHeight;
                   if (stickToBottom && outEl.scrollIntoView) outEl.scrollIntoView({block:'end'});
                   return read();
@@ -587,6 +619,7 @@ const repoPageTpl = `<!doctype html>
                 boxStatusEl.textContent = 'done';
                 boxStatusEl.className = 'status-badge done';
               }
+              if (summarizers[sumKey]) summarizers[sumKey].stop();
               remaining--;
               if (remaining === 0) {
                 showNextPromptAndRemovePending();
@@ -667,6 +700,9 @@ const repoPageTpl = `<!doctype html>
               var el = document.getElementById('status-' + m + '-{{.PendingIdx}}');
               if (el) { el.textContent = 'stopped'; el.className = 'status-badge'; }
             });
+            Object.keys(summarizers).forEach(function(k){
+              try { summarizers[k].stop(); } catch(e){}
+            });
             showNextPromptAndRemovePending();
           });
 
@@ -718,15 +754,21 @@ const repoPageTpl = `<!doctype html>
             var out = document.getElementById('out-' + model + '-' + i);
             var prev = document.getElementById('prev-' + model + '-' + i);
             if (!out || !prev) return;
+            var key = model + '-' + i;
+            var sum = (typeof summarizers !== 'undefined') ? summarizers[key] : null;
             var hidden = out.hasAttribute('hidden');
             if (hidden) {
+              // Expanding: freeze live summary and show raw output
+              if (sum && sum.freeze) sum.freeze();
               out.removeAttribute('hidden');
               prev.style.display = 'none';
               btn.textContent = 'Collapse';
             } else {
+              // Collapsing: resume live summary (if still running), and refresh static preview for completed entries
               out.setAttribute('hidden', 'hidden');
               prev.style.display = '';
               btn.textContent = 'Expand';
+              if (sum && sum.resume) sum.resume();
               updatePreviewFor(model, i);
             }
           });
@@ -1409,6 +1451,41 @@ func nbHeadHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(strings.TrimSpace(string(out))))
 }
 
+// POST /api/summarize
+func summarizeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	txt := strings.TrimSpace(r.FormValue("text"))
+	if len(txt) > 8000 {
+		txt = txt[len(txt)-8000:]
+	}
+	prompt := "What is this tool doing right now? Please respond in a single short sentence.\n\nTranscript:\n" + txt
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "llm", "--model", "gpt-5-nano", prompt)
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		cmd.Env = append(os.Environ(), "OPENAI_API_KEY="+key)
+	} else {
+		cmd.Env = os.Environ()
+		log.Printf("summarizeHandler: warning: OPENAI_API_KEY not set")
+	}
+	out, err := cmd.Output()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if err != nil {
+		log.Printf("summarizeHandler: llm error: %v", err)
+		_, _ = w.Write([]byte("working..."))
+		return
+	}
+	_, _ = w.Write([]byte(strings.TrimSpace(string(out))))
+}
+
 func newMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", indexHandler)
@@ -1418,6 +1495,7 @@ func newMux() http.Handler {
 	mux.HandleFunc("/prompt", promptHandler)
 	mux.HandleFunc("/run", runHandler)
 	mux.HandleFunc("/api/head", nbHeadHandler)
+	mux.HandleFunc("/api/summarize", summarizeHandler)
 	mux.HandleFunc("/healthz", healthHandler)
 	return mux
 }
