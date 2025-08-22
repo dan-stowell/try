@@ -380,9 +380,9 @@ const repoPageTpl = `<!doctype html>
     main { margin:auto; width: min(90vw, 900px); }
     h1 { text-align:center; font-weight:700; font-size: clamp(1.5rem, 5vw, 2.5rem); margin-bottom: 16px; }
     form { display:flex; flex-direction:column; gap:12px; }
-    .prompt-input { width:100%; font-size:1rem; padding:12px 14px; border-radius:8px; resize: vertical; }
+    .prompt-input { width:100%; box-sizing:border-box; font-size:1rem; padding:12px 14px; border-radius:8px; resize: vertical; }
     .llm-out { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; padding:12px 14px; border-radius:8px; overflow:auto; }
-    .outbox { border: 1px solid #e5e7eb; background: #f9fafb; border-radius:8px; padding:10px 12px; margin:8px 0 16px; }
+    .outbox { width:100%; box-sizing:border-box; border: 1px solid #e5e7eb; background: #f9fafb; border-radius:8px; padding:10px 12px; margin:8px 0 16px; }
     .box-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
     .status-badge { font-size:0.9rem; color:#6b7280; }
     .status-badge.done { color:#16a34a; }
