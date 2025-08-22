@@ -377,8 +377,8 @@ const repoPageTpl = `<!doctype html>
   <style>
     :root { color-scheme: light; }
     body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; display:flex; min-height:100vh; }
-    main { margin:auto; width: min(90vw, 900px); }
-    h1 { text-align:center; font-weight:700; font-size: clamp(1.5rem, 5vw, 2.5rem); margin-bottom: 16px; }
+    main { margin: 0; width: 50vw; }
+    h1 { text-align:left; font-weight:700; font-size: clamp(1.5rem, 5vw, 2.5rem); margin-bottom: 16px; }
     form { display:flex; flex-direction:column; gap:12px; }
     .prompt-input { width:100%; box-sizing:border-box; font-size:1rem; padding:12px 14px; border-radius:8px; resize: vertical; }
     .llm-out { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; padding:12px 14px; border-radius:8px; overflow:auto; }
