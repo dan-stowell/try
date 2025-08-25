@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"flag" // Added import for flag
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,13 +18,14 @@ import (
 	_ "modernc.org/sqlite" // Import for SQLite driver
 )
 
-const dbPath = ".trydb"
+var repoPath string
 
 // InitDB initializes the SQLite database and creates the 'tries' table if it doesn't exist.
 func InitDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	dbFilePath := filepath.Join(repoPath, ".trydb")
+	db, err := sql.Open("sqlite", dbFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to open database %s: %w", dbFilePath, err)
 	}
 
 	createTableSQL := `
@@ -156,6 +158,18 @@ func OpenBrowser(url string) error {
 }
 
 func main() {
+	// Define and parse flags
+	flag.StringVar(&repoPath, "repo", ".", "Path to the Git repository")
+	flag.Parse()
+
+	// Resolve the absolute path for the repository
+	absRepoPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		fmt.Printf("Error resolving repository path: %v\n", err)
+		os.Exit(1)
+	}
+	repoPath = absRepoPath
+
 	// Initialize the database
 	db, err := InitDB()
 	if err != nil {
@@ -165,14 +179,18 @@ func main() {
 	defer db.Close()
 
 	// Check if inside a Git repository
-	_, err = exec.Command("git", "rev-parse", "--is-inside-work-tree").Output()
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = repoPath
+	_, err = cmd.Output()
 	if err != nil {
-		fmt.Println("Error: 'try' must be run from within a Git project.")
+		fmt.Println("Error: 'try' must be run from within a Git project. Use --repo flag if not in CWD.")
 		os.Exit(1)
 	}
 
 	// Get initial commit hash
-	initialCommitBytes, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	cmd = exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = repoPath
+	initialCommitBytes, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("Error getting initial commit: %v\n", err)
 		os.Exit(1)
@@ -180,20 +198,22 @@ func main() {
 	initialCommit := strings.TrimSpace(string(initialCommitBytes))
 
 	// Get initial branch name
-	initialBranchBytes, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = repoPath
+	initialBranchBytes, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("Error getting initial branch: %v\n", err)
 		os.Exit(1)
 	}
 	initialBranch := strings.TrimSpace(string(initialBranchBytes))
 
-
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: try \"something i would like to try\"")
+	if len(flag.Args()) < 1 {
+		fmt.Println("Usage: try [options] \"something i would like to try\"")
+		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	input := os.Args[1]
+	input := flag.Args()[0]
 	// Format the user input for the branch name prefix
 	branchPrefix := formatToBranchName(input)
 
@@ -211,15 +231,11 @@ func main() {
 
 	// Create a new git worktree
 	// The worktree path is the full temporary directory path
-	cmd := exec.Command("git", "worktree", "add", "-b", branchName, tempDir)
+	cmd = exec.Command("git", "worktree", "add", "-b", branchName, tempDir)
+	cmd.Dir = repoPath // Execute git command in the specified repository path
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
-	if err != nil {
-		fmt.Printf("Error creating git worktree: %v\n", err)
-		os.Exit(1)
-	}
-
 	if err != nil {
 		fmt.Printf("Error creating git worktree: %v\n", err)
 		os.Exit(1)
