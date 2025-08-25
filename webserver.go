@@ -39,8 +39,8 @@ func StartWebServer(branchName string) (string, error) {
 <body>
     <h1>{{.BranchName}}</h1>
     <form action="/" method="post">
-        <input type="text" name="input_text" placeholder="Enter something to try..." style="width: 80%;">
-        <button type="submit">Try</button>
+        <input type="text" name="input_text" placeholder="Enter something to try..." style="width: 80%; padding: 15px; font-size: 1.2em;">
+        <button type="submit" style="padding: 15px 30px; font-size: 1.2em;">Try</button>
     </form>
 </body>
 </html>
