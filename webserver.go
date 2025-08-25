@@ -36,9 +36,10 @@ func StartWebServer(branchName string) (string, error) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.BranchName}}</title>
     <style>
-        body { font-family: sans-serif; margin: 0; padding: 2em; background-color: #f0f0f0; display: flex; flex-direction: column; min-height: 100vh; }
-        h1 { color: #333; margin-bottom: 20px; text-align: left; }
-        .container { flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; max-width: 100%; margin: 0; padding: 0; }
+html, body { height: 100%; margin: 0; padding: 0; } /* Ensure html and body take full height */
+body { font-family: sans-serif; padding: 2em; background-color: #f0f0f0; display: flex; flex-direction: column; }
+h1 { color: #333; margin-bottom: 20px; text-align: left; }
+.container { flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; max-width: 100%; margin: 0; padding: 0; box-sizing: border-box; } /* Add box-sizing */
         .form-container { display: flex; gap: 10px; margin-top: auto; align-items: flex-start; }
         input[type="text"] { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
         button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; flex-shrink: 0; }
