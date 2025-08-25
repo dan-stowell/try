@@ -225,9 +225,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Use the base name of the temporary directory as the branch name
-	// Prepend "try-" to ensure it starts with an alphabetic character for Git
-	branchName := "try-" + filepath.Base(tempDir)
+	// Combine the formatted input and the temporary directory base name
+	// This ensures the branch name is unique and descriptive, incorporating the prompt
+	branchName := branchPrefix + "-" + filepath.Base(tempDir)
+
+	// Ensure the branch name is still within 24 characters after appending the tempDirBase
+	if len(branchName) > 24 {
+		branchName = branchName[:24]
+	}
+
+	// Remove leading/trailing hyphens that might result from truncation
+	branchName = strings.Trim(branchName, "-")
 
 	// Create a new git worktree
 	// The worktree path is the full temporary directory path
