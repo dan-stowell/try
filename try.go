@@ -23,37 +23,23 @@ func main() {
 	}
 
 	input := os.Args[1]
-	// Create a temporary directory for the worktree
-	tempDir, err := os.MkdirTemp("", "try") // Removed trailing hyphen from pattern
+	// Format the user input for the branch name prefix
+	branchPrefix := formatToBranchName(input)
+
+	// Create a temporary directory for the worktree, using the branchPrefix in the pattern
+	// os.MkdirTemp will append a unique suffix
+	tempDir, err := os.MkdirTemp("", branchPrefix+"-")
 	if err != nil {
 		fmt.Printf("Error creating temporary directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Format the user input for the branch name prefix
-	branchPrefix := formatToBranchName(input)
-
-	// Extract the base name of the temporary directory
-	tempDirBase := filepath.Base(tempDir)
-
-	// Combine the formatted input and the temporary directory base name
-	// Only add a hyphen if both parts are non-empty
-	branchName := branchPrefix
-	if branchPrefix != "" && tempDirBase != "" {
-		branchName = fmt.Sprintf("%s-%s", branchPrefix, tempDirBase)
-	} else if tempDirBase != "" {
-		branchName = tempDirBase
-	}
-
-	// Ensure the final branch name does not exceed 24 characters
-	if len(branchName) > 24 {
-		branchName = branchName[:24]
-	}
-
-	// Trim any trailing hyphens that might result from truncation or empty parts
-	branchName = strings.TrimRight(branchName, "-")
+	// Use the base name of the temporary directory as the branch name
+	// This ensures the branch name is unique and descriptive
+	branchName := filepath.Base(tempDir)
 
 	// Create a new git worktree
+	// The worktree path is the full temporary directory path
 	cmd := exec.Command("git", "worktree", "add", "-b", branchName, tempDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
