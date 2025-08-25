@@ -3,11 +3,19 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 )
 
 func main() {
+	// Check if inside a Git repository
+	_, err := exec.Command("git", "rev-parse", "--is-inside-work-tree").Output()
+	if err != nil {
+		fmt.Println("Error: 'try' must be run from within a Git project.")
+		os.Exit(1)
+	}
+
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: try \"something i would like to try\"")
 		os.Exit(1)
