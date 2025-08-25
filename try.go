@@ -31,6 +31,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Check if the branch already exists, and if so, append a unique identifier
+	originalBranchName := branchName
+	for i := 0; ; i++ {
+		cmd := exec.Command("git", "rev-parse", "--verify", branchName)
+		if cmd.Run() != nil { // Branch does not exist
+			break
+		}
+		// Branch exists, append a unique identifier
+		branchName = fmt.Sprintf("%s-%d", originalBranchName, i+1)
+		if len(branchName) > 24 { // Ensure it still fits within 24 chars if possible
+			branchName = branchName[:24]
+		}
+	}
+
 	// Create a new git worktree
 	cmd := exec.Command("git", "worktree", "add", "-b", branchName, tempDir)
 	cmd.Stdout = os.Stdout
