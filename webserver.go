@@ -35,6 +35,13 @@ func StartWebServer(branchName string) (string, error) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.BranchName}}</title>
+    <style>
+        html, body { height: 100%; margin: 0; padding: 0; }
+        body { display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box; }
+        h1 { margin-top: 0; }
+        form { display: flex; gap: 10px; width: 100%; }
+        input[type="text"] { flex-grow: 1; }
+    </style>
 </head>
 <body>
     <h1>{{.BranchName}}</h1>
