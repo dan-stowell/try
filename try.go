@@ -101,6 +101,9 @@ func main() {
 			fmt.Printf("Error opening browser: %v\n", err)
 		}
 	}
+
+	// Keep the main goroutine alive to serve the web page
+	select {}
 }
 
 func formatToBranchName(s string) string {
