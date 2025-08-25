@@ -30,14 +30,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Use the basename of the temporary directory as the branch name
-	branchName := formatToBranchName(input)
+	// Format the user input for the branch name prefix
+	branchPrefix := formatToBranchName(input)
+
 	// Extract the base name of the temporary directory
 	tempDirBase := filepath.Base(tempDir)
-	branchName = fmt.Sprintf("%s-%s", branchName, tempDirBase)
 
-	// Re-sanitize the combined branch name to ensure it meets all criteria
-	branchName = formatToBranchName(branchName)
+	// Combine the formatted input and the temporary directory base name
+	branchName := fmt.Sprintf("%s-%s", branchPrefix, tempDirBase)
+
+	// Ensure the final branch name does not exceed 24 characters
+	if len(branchName) > 24 {
+		branchName = branchName[:24]
+	}
 
 	// Create a new git worktree
 	cmd := exec.Command("git", "worktree", "add", "-b", branchName, tempDir)
