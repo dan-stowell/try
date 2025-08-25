@@ -25,10 +25,9 @@ func main() {
 	branchName := formatToBranchName(input)
 
 	// Create a temporary directory for the worktree
-	tempDir := fmt.Sprintf("try-%s", branchName)
-	err = os.MkdirAll(tempDir, 0755)
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("try-%s-", branchName))
 	if err != nil {
-		fmt.Printf("Error creating temporary directory %s: %v\n", tempDir, err)
+		fmt.Printf("Error creating temporary directory: %v\n", err)
 		os.Exit(1)
 	}
 
