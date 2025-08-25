@@ -164,6 +164,8 @@ func main() {
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 	flag.Parse()
 
+	var err error // Declare err once here
+
 	if debug {
 		fmt.Printf("Debug: repoPath initial: %s\n", repoPath)
 	}
