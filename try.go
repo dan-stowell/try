@@ -226,8 +226,8 @@ func main() {
 	}
 
 	// Use the base name of the temporary directory as the branch name
-	// This ensures the branch name is unique and descriptive
-	branchName := filepath.Base(tempDir)
+	// Prepend "try-" to ensure it starts with an alphabetic character for Git
+	branchName := "try-" + filepath.Base(tempDir)
 
 	// Create a new git worktree
 	// The worktree path is the full temporary directory path
