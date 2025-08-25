@@ -22,7 +22,7 @@ func StartWebServer(branchName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to find an open port: %w", err)
 	}
-	defer listener.Close() // Close the listener after we get the address
+	// Do not close the listener here; it will be closed when http.Serve returns or on program exit.
 
 	port := listener.Addr().(*net.TCPAddr).Port
 	url := fmt.Sprintf("http://localhost:%d", port)
