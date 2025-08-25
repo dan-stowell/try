@@ -43,6 +43,14 @@ func main() {
 	}
 	initialBranch := strings.TrimSpace(string(initialBranchBytes))
 
+	// Get repository name
+	repoNameBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		fmt.Printf("Error getting repository root: %v\n", err)
+		os.Exit(1)
+	}
+	repoName := filepath.Base(strings.TrimSpace(string(repoNameBytes)))
+
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: try \"something i would like to try\"")
 		os.Exit(1)
@@ -90,7 +98,7 @@ func main() {
 	fmt.Printf("Created worktree at %s on branch %s\n", tempDir, branchName)
 
 	// Start the web server
-	serverURL, err := StartWebServer(branchName)
+	serverURL, err := StartWebServer(repoName, input, branchName)
 	if err != nil {
 		fmt.Printf("Error starting web server: %v\n", err)
 		// Do not exit, as the worktree was already created successfully
