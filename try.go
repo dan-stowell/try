@@ -19,6 +19,7 @@ import (
 )
 
 var repoPath string
+var debug bool
 
 // InitDB initializes the SQLite database and creates the 'tries' table if it doesn't exist.
 func InitDB() (*sql.DB, error) {
@@ -160,7 +161,12 @@ func OpenBrowser(url string) error {
 func main() {
 	// Define and parse flags
 	flag.StringVar(&repoPath, "repo", ".", "Path to the Git repository")
+	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 	flag.Parse()
+
+	if debug {
+		fmt.Printf("Debug: repoPath initial: %s\n", repoPath)
+	}
 
 	// Resolve the absolute path for the repository
 	absRepoPath, err := filepath.Abs(repoPath)
@@ -168,7 +174,9 @@ func main() {
 		fmt.Printf("Error resolving repository path: %v\n", err)
 		os.Exit(1)
 	}
-	repoPath = absRepoPath
+	if debug {
+		fmt.Printf("Debug: repoPath resolved: %s\n", repoPath)
+	}
 
 	// Initialize the database
 	db, err := InitDB()
@@ -181,6 +189,9 @@ func main() {
 	// Check if inside a Git repository
 	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
 	cmd.Dir = repoPath
+	if debug {
+		fmt.Printf("Debug: Executing command: git rev-parse --is-inside-work-tree (in %s)\n", repoPath)
+	}
 	_, err = cmd.Output()
 	if err != nil {
 		fmt.Println("Error: 'try' must be run from within a Git project. Use --repo flag if not in CWD.")
@@ -190,22 +201,34 @@ func main() {
 	// Get initial commit hash
 	cmd = exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = repoPath
+	if debug {
+		fmt.Printf("Debug: Executing command: git rev-parse HEAD (in %s)\n", repoPath)
+	}
 	initialCommitBytes, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("Error getting initial commit: %v\n", err)
 		os.Exit(1)
 	}
 	initialCommit := strings.TrimSpace(string(initialCommitBytes))
+	if debug {
+		fmt.Printf("Debug: Initial commit: %s\n", initialCommit)
+	}
 
 	// Get initial branch name
 	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.Dir = repoPath
+	if debug {
+		fmt.Printf("Debug: Executing command: git rev-parse --abbrev-ref HEAD (in %s)\n", repoPath)
+	}
 	initialBranchBytes, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("Error getting initial branch: %v\n", err)
 		os.Exit(1)
 	}
 	initialBranch := strings.TrimSpace(string(initialBranchBytes))
+	if debug {
+		fmt.Printf("Debug: Initial branch: %s\n", initialBranch)
+	}
 
 	if len(flag.Args()) < 1 {
 		fmt.Println("Usage: try [options] \"something i would like to try\"")
@@ -214,8 +237,15 @@ func main() {
 	}
 
 	input := flag.Args()[0]
+	if debug {
+		fmt.Printf("Debug: User input prompt: \"%s\"\n", input)
+	}
+
 	// Format the user input for the branch name prefix
 	branchPrefix := formatToBranchName(input)
+	if debug {
+		fmt.Printf("Debug: Sanitized branch prefix from prompt: \"%s\"\n", branchPrefix)
+	}
 
 	// Create a temporary directory for the worktree, using a generic prefix
 	// We will construct the branch name from the prompt and the unique part of the temp dir
@@ -224,20 +254,35 @@ func main() {
 		fmt.Printf("Error creating temporary directory: %v\n", err)
 		os.Exit(1)
 	}
+	if debug {
+		fmt.Printf("Debug: Created temporary directory: %s\n", tempDir)
+	}
 
 	// Extract the unique part of the temporary directory name
 	uniqueSuffix := strings.TrimPrefix(filepath.Base(tempDir), "try-")
+	if debug {
+		fmt.Printf("Debug: Unique suffix from temp dir: \"%s\"\n", uniqueSuffix)
+	}
 
 	// Combine the sanitized prompt with the unique suffix
 	// This ensures the branch name is descriptive and unique
 	rawBranchName := fmt.Sprintf("%s-%s", branchPrefix, uniqueSuffix)
+	if debug {
+		fmt.Printf("Debug: Raw combined branch name: \"%s\"\n", rawBranchName)
+	}
 
 	// Sanitize the combined name to ensure it's a valid Git branch name and truncated
 	branchName := formatToBranchName(rawBranchName)
+	if debug {
+		fmt.Printf("Debug: Final sanitized branch name: \"%s\"\n", branchName)
+	}
 
 	// Ensure the branch name is not empty after sanitization
 	if branchName == "" {
 		branchName = "try-" + uniqueSuffix // Fallback to a unique name if sanitization results in empty string
+		if debug {
+			fmt.Printf("Debug: Branch name was empty, falling back to: \"%s\"\n", branchName)
+		}
 	}
 
 	// Create a new git worktree
@@ -246,6 +291,9 @@ func main() {
 	cmd.Dir = repoPath // Execute git command in the specified repository path
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if debug {
+		fmt.Printf("Debug: Executing command: git worktree add -b %s %s (in %s)\n", branchName, tempDir, repoPath)
+	}
 	err = cmd.Run()
 	if err != nil {
 		fmt.Printf("Error creating git worktree: %v\n", err)
@@ -279,15 +327,28 @@ func main() {
 }
 
 func formatToBranchName(s string) string {
+	if debug {
+		fmt.Printf("Debug: formatToBranchName input: \"%s\"\n", s)
+	}
+
 	// Replace spaces of any kind with hyphens
 	s = regexp.MustCompile(`\s+`).ReplaceAllString(s, "-")
+	if debug {
+		fmt.Printf("Debug: formatToBranchName after space replace: \"%s\"\n", s)
+	}
 
 	// Strip any punctuation (keep alphanumeric and hyphens)
 	reg := regexp.MustCompile(`[^a-zA-Z0-9-]+`)
 	s = reg.ReplaceAllString(s, "")
+	if debug {
+		fmt.Printf("Debug: formatToBranchName after punctuation strip: \"%s\"\n", s)
+	}
 
 	// Convert to lowercase
 	s = strings.ToLower(s)
+	if debug {
+		fmt.Printf("Debug: formatToBranchName after lowercase: \"%s\"\n", s)
+	}
 
 	// Split into words
 	words := strings.Fields(s)
@@ -320,6 +381,9 @@ func formatToBranchName(s string) string {
 
 	// Remove leading/trailing hyphens that might result from truncation
 	s = strings.Trim(s, "-")
+	if debug {
+		fmt.Printf("Debug: formatToBranchName final output: \"%s\"\n", s)
+	}
 
 	return s
 }
