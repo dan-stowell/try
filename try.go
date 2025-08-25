@@ -24,7 +24,7 @@ func main() {
 
 	input := os.Args[1]
 	// Create a temporary directory for the worktree
-	tempDir, err := os.MkdirTemp("", "try-") // Use a generic prefix for the temp dir
+	tempDir, err := os.MkdirTemp("", "try") // Removed trailing hyphen from pattern
 	if err != nil {
 		fmt.Printf("Error creating temporary directory: %v\n", err)
 		os.Exit(1)
@@ -37,12 +37,21 @@ func main() {
 	tempDirBase := filepath.Base(tempDir)
 
 	// Combine the formatted input and the temporary directory base name
-	branchName := fmt.Sprintf("%s-%s", branchPrefix, tempDirBase)
+	// Only add a hyphen if both parts are non-empty
+	branchName := branchPrefix
+	if branchPrefix != "" && tempDirBase != "" {
+		branchName = fmt.Sprintf("%s-%s", branchPrefix, tempDirBase)
+	} else if tempDirBase != "" {
+		branchName = tempDirBase
+	}
 
 	// Ensure the final branch name does not exceed 24 characters
 	if len(branchName) > 24 {
 		branchName = branchName[:24]
 	}
+
+	// Trim any trailing hyphens that might result from truncation or empty parts
+	branchName = strings.TrimRight(branchName, "-")
 
 	// Create a new git worktree
 	cmd := exec.Command("git", "worktree", "add", "-b", branchName, tempDir)
