@@ -98,7 +98,7 @@ func main() {
 	fmt.Printf("Created worktree at %s on branch %s\n", tempDir, branchName)
 
 	// Start the web server
-	serverURL, err := StartWebServer(repoName, input, branchName)
+	serverURL, err := StartWebServer(repoName, input, branchName, tempDir)
 	if err != nil {
 		fmt.Printf("Error starting web server: %v\n", err)
 		// Do not exit, as the worktree was already created successfully

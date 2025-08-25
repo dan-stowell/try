@@ -11,14 +11,15 @@ import (
 
 // PageData holds data for the HTML template
 type PageData struct {
-	RepoName   string
-	Prompt     string
-	BranchName string
+	RepoName     string
+	Prompt       string
+	BranchName   string
+	WorktreePath string
 }
 
 // StartWebServer starts a web server on an available port and serves the index page.
 // It returns the URL of the server.
-func StartWebServer(repoName, prompt, branchName string) (string, error) {
+func StartWebServer(repoName, prompt, branchName, worktreePath string) (string, error) {
 	// Find an available port
 	listener, err := net.Listen("tcp", ":0") // Listen on port 0 to get a random available port
 	if err != nil {
@@ -41,12 +42,14 @@ func StartWebServer(repoName, prompt, branchName string) (string, error) {
         html, body { height: 100%; margin: 0; padding: 0; }
         body { display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box; }
         h1 { margin-top: 0; }
+        .worktree-path { font-size: 0.8em; color: #666; margin-bottom: 20px; }
         form { display: flex; gap: 10px; width: 100%; }
         input[type="text"] { flex-grow: 1; }
     </style>
 </head>
 <body>
     <h1>{{.RepoName}}: {{.Prompt}}</h1>
+    <div class="worktree-path">{{.WorktreePath}}</div>
     <form action="/" method="post">
         <input type="text" name="input_text" placeholder="Enter something to try..." style="width: 80%; padding: 15px; font-size: 1.2em;">
         <button type="submit" style="padding: 15px 30px; font-size: 1.2em;">Try</button>
@@ -65,7 +68,7 @@ func StartWebServer(repoName, prompt, branchName string) (string, error) {
 			// Handle form submission (for future use)
 			fmt.Fprintf(w, "You submitted: %s", r.FormValue("input_text"))
 		} else {
-			data := PageData{RepoName: repoName, Prompt: prompt, BranchName: branchName}
+			data := PageData{RepoName: repoName, Prompt: prompt, BranchName: branchName, WorktreePath: worktreePath}
 			t.Execute(w, data)
 		}
 	})
