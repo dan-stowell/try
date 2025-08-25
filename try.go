@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"database/sql" // Added import for database/sql
 	"html/template"
 	"net"
 	"net/http"
