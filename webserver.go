@@ -37,17 +37,20 @@ func StartWebServer(branchName string) (string, error) {
     <title>{{.BranchName}}</title>
     <style>
         body { font-family: sans-serif; margin: 2em; }
-        h1 { color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        input[type="text"] { width: calc(100% - 22px); padding: 10px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; }
-        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        h1 { color: #333; margin-bottom: 20px; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; flex-direction: column; min-height: calc(100vh - 4em); justify-content: space-between; }
+        .form-container { display: flex; gap: 10px; margin-top: auto; }
+        input[type="text"] { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; flex-shrink: 0; }
         button:hover { background-color: #0056b3; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>{{.BranchName}}</h1>
-        <form action="/" method="post">
+        <!-- Content area for future use -->
+        <div style="flex-grow: 1;"></div> 
+        <form class="form-container" action="/" method="post">
             <input type="text" name="input_text" placeholder="Enter something to try...">
             <button type="submit">Try</button>
         </form>
