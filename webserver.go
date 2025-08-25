@@ -40,16 +40,18 @@ func StartWebServer(repoName, prompt, branchName, worktreePath string) (string, 
     <title>{{.RepoName}}: {{.Prompt}}</title>
     <style>
         html, body { height: 100%; margin: 0; padding: 0; }
-        body { display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box; }
-        h1 { margin-top: 0; }
-        .worktree-path { font-size: 0.8em; color: #666; margin-bottom: 20px; }
-        form { display: flex; gap: 10px; width: 100%; }
+        body { display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; } /* Removed justify-content: space-between */
+        h1 { margin-top: 0; margin-bottom: 5px; } /* Reduced margin-bottom for h1 */
+        .worktree-path { font-size: 0.8em; color: #666; margin-bottom: 20px; } /* Kept margin-bottom for spacing from form */
+        .content-area { flex-grow: 1; } /* Added a new class to push the form to the bottom */
+        form { display: flex; gap: 10px; width: 100%; margin-top: auto; } /* Added margin-top: auto to push form to bottom */
         input[type="text"] { flex-grow: 1; }
     </style>
 </head>
 <body>
     <h1>{{.RepoName}}: {{.Prompt}}</h1>
     <div class="worktree-path">{{.WorktreePath}}</div>
+    <div class="content-area"></div> <!-- Added content-area to push form down -->
     <form action="/" method="post">
         <input type="text" name="input_text" placeholder="Enter something to try..." style="width: 80%; padding: 15px; font-size: 1.2em;">
         <button type="submit" style="padding: 15px 30px; font-size: 1.2em;">Try</button>
