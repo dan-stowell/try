@@ -169,7 +169,7 @@ func main() {
 	}
 
 	// Resolve the absolute path for the repository
-	absRepoPath, err := filepath.Abs(repoPath)
+	repoPath, err = filepath.Abs(repoPath)
 	if err != nil {
 		fmt.Printf("Error resolving repository path: %v\n", err)
 		os.Exit(1)
