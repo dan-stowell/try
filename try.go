@@ -23,7 +23,26 @@ func main() {
 
 	input := os.Args[1]
 	branchName := formatToBranchName(input)
-	fmt.Println(branchName)
+
+	// Create a temporary directory for the worktree
+	tempDir := fmt.Sprintf("try-%s", branchName)
+	err = os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		fmt.Printf("Error creating temporary directory %s: %v\n", tempDir, err)
+		os.Exit(1)
+	}
+
+	// Create a new git worktree
+	cmd := exec.Command("git", "worktree", "add", "-b", branchName, tempDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if err != nil {
+		fmt.Printf("Error creating git worktree: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Created worktree at %s on branch %s\n", tempDir, branchName)
 }
 
 func formatToBranchName(s string) string {
