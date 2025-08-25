@@ -22,27 +22,21 @@ func main() {
 	}
 
 	input := os.Args[1]
-	branchName := formatToBranchName(input)
-
 	// Create a temporary directory for the worktree
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf("try-%s-", branchName))
+	tempDir, err := os.MkdirTemp("", "try-") // Use a generic prefix for the temp dir
 	if err != nil {
 		fmt.Printf("Error creating temporary directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Check if the branch already exists, and if so, append a unique identifier
-	originalBranchName := branchName
-	for i := 0; ; i++ {
-		cmd := exec.Command("git", "rev-parse", "--verify", branchName)
-		if cmd.Run() != nil { // Branch does not exist
-			break
-		}
-		// Branch exists, append a unique identifier
-		branchName = fmt.Sprintf("%s-%d", originalBranchName, i+1)
-		if len(branchName) > 24 { // Ensure it still fits within 24 chars if possible
-			branchName = branchName[:24]
-		}
+	// Use the basename of the temporary directory as the branch name
+	branchName := formatToBranchName(input)
+	tempDirBase := strings.TrimPrefix(tempDir, os.TempDir()+string(os.PathSeparator))
+	branchName = fmt.Sprintf("%s-%s", branchName, tempDirBase)
+
+	// Ensure the branch name is still within 24 characters after appending the tempDirBase
+	if len(branchName) > 24 {
+		branchName = branchName[:24]
 	}
 
 	// Create a new git worktree
