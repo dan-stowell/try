@@ -11,15 +11,13 @@ import (
 
 // PageData holds data for the HTML template
 type PageData struct {
-	RepoName     string
-	Prompt       string
 	BranchName   string
 	WorktreePath string
 }
 
 // StartWebServer starts a web server on an available port and serves the index page.
 // It returns the URL of the server.
-func StartWebServer(repoName, prompt, branchName, worktreePath string) (string, error) {
+func StartWebServer(branchName, worktreePath string) (string, error) {
 	// Find an available port
 	listener, err := net.Listen("tcp", ":0") // Listen on port 0 to get a random available port
 	if err != nil {
@@ -37,21 +35,24 @@ func StartWebServer(repoName, prompt, branchName, worktreePath string) (string, 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.RepoName}}: {{.Prompt}}</title>
+    <title>{{.BranchName}}</title>
     <style>
         html, body { height: 100%; margin: 0; padding: 0; }
-        body { display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; } /* Removed justify-content: space-between */
-        h1 { margin-top: 0; margin-bottom: 5px; } /* Reduced margin-bottom for h1 */
-        .worktree-path { font-size: 0.8em; color: #666; margin-bottom: 20px; } /* Kept margin-bottom for spacing from form */
-        .content-area { flex-grow: 1; } /* Added a new class to push the form to the bottom */
-        form { display: flex; gap: 10px; width: 100%; margin-top: auto; } /* Added margin-top: auto to push form to bottom */
+        body { display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; }
+        .header-container { background-color: #f0f0f0; padding: 10px 20px; margin: -20px -20px 20px -20px; } /* Neutral gray background for header */
+        h1 { margin-top: 0; margin-bottom: 5px; font-size: 1.8em; } /* Slightly bigger font size */
+        .worktree-path { font-size: 0.8em; color: #666; margin-bottom: 20px; }
+        .content-area { flex-grow: 1; }
+        form { display: flex; gap: 10px; width: 100%; margin-top: auto; }
         input[type="text"] { flex-grow: 1; }
     </style>
 </head>
 <body>
-    <h1>{{.RepoName}}: {{.Prompt}}</h1>
-    <div class="worktree-path">{{.WorktreePath}}</div>
-    <div class="content-area"></div> <!-- Added content-area to push form down -->
+    <div class="header-container">
+        <h1>{{.BranchName}}</h1>
+        <div class="worktree-path">{{.WorktreePath}}</div>
+    </div>
+    <div class="content-area"></div>
     <form action="/" method="post">
         <input type="text" name="input_text" placeholder="Enter something to try..." style="width: 80%; padding: 15px; font-size: 1.2em;">
         <button type="submit" style="padding: 15px 30px; font-size: 1.2em;">Try</button>
@@ -70,7 +71,7 @@ func StartWebServer(repoName, prompt, branchName, worktreePath string) (string, 
 			// Handle form submission (for future use)
 			fmt.Fprintf(w, "You submitted: %s", r.FormValue("input_text"))
 		} else {
-			data := PageData{RepoName: repoName, Prompt: prompt, BranchName: branchName, WorktreePath: worktreePath}
+			data := PageData{BranchName: branchName, WorktreePath: worktreePath}
 			t.Execute(w, data)
 		}
 	})
